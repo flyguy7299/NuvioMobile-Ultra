@@ -1,3 +1,4 @@
+# Enable manual Android build
 name: Build Android Release
 
 on:
