@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.util.concurrent.atomic.AtomicLong
 
 actual object CastDelivery {
 
@@ -50,6 +51,7 @@ actual object CastDelivery {
     /** One delivery at a time: they share every field above. */
     private val deliveryLock = Mutex()
     @Volatile private var activeDelivery: Job? = null
+    private val castGeneration = AtomicLong()
     private val watchScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val _status = MutableStateFlow<CastDeliveryStatus>(CastDeliveryStatus.Idle)
@@ -60,8 +62,13 @@ actual object CastDelivery {
         appContext = context.applicationContext
         // Nothing is casting yet, so anything in cast/ was left by a process that was killed
         // mid-cast — possibly a multi-gigabyte live remux — and would otherwise stay forever.
+        // Only files older than this moment, so a cast started before the purge thread gets to
+        // the directory keeps its own file.
         val leftovers = File(context.cacheDir, "cast")
-        Thread({ leftovers.listFiles()?.forEach { runCatching { it.delete() } } }, "cast-cache-purge").start()
+        val cutoff = System.currentTimeMillis()
+        Thread({
+            leftovers.listFiles()?.filter { it.lastModified() < cutoff }?.forEach { runCatching { it.delete() } }
+        }, "cast-cache-purge").start()
     }
 
     actual suspend fun cast(request: CastStreamRequest): Result<Unit> {
@@ -69,7 +76,11 @@ actual object CastDelivery {
         // probe), so it is cancelled and waited out rather than left to release or overwrite the
         // resources this one is about to create.
         activeDelivery?.cancel()
+        // Only the newest request may run: a cast still queued for the lock when a newer one (or
+        // cancel()) arrives gives up instead of running after it.
+        val generation = castGeneration.incrementAndGet()
         return deliveryLock.withLock {
+            if (generation != castGeneration.get()) throw CancellationException("Superseded by a newer cast")
             val self = currentCoroutineContext()[Job]
             activeDelivery = self
             try {
@@ -240,7 +251,9 @@ actual object CastDelivery {
 
     actual fun cancel() {
         // Cancelling the delivery coroutine itself, not only its resources: a cast still
-        // probing, asking or loading would otherwise carry on afterwards and publish again.
+        // probing, asking or loading would otherwise carry on afterwards and publish again. The
+        // generation bump stops any cast still waiting for the lock as well.
+        castGeneration.incrementAndGet()
         activeDelivery?.cancel()
         processor?.cancel()
         releasePrevious()

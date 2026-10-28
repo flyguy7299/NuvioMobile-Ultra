@@ -25,9 +25,8 @@ sealed interface CastDeliveryStatus {
     data class Failed(val message: String, val occurrence: Long = nextFailureOccurrence()) : CastDeliveryStatus
 }
 
-private var failureOccurrences = 0L
-
-private fun nextFailureOccurrence(): Long = ++failureOccurrences
+/** Random rather than a shared counter, so concurrent failures need no synchronisation. */
+private fun nextFailureOccurrence(): Long = kotlin.random.Random.nextLong()
 
 data class CastStreamRequest(
     val url: String,
