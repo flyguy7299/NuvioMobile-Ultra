@@ -4,9 +4,13 @@ import android.content.Context
 import android.util.Log
 import com.nuvio.app.features.cast.model.CastContainer
 import com.nuvio.app.features.cast.model.CastMediaProbe
+import com.nuvio.app.features.settings.NuvioEnhancedSettingsRepository
+import com.nuvio.app.features.settings.NuvioEnhancedSettingsUiState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -18,11 +22,19 @@ actual object CastDelivery {
     private const val TAG = "CastDelivery"
     private const val DIRECT_PLAY_PROBE_TIMEOUT_MS = 8_000L
 
+    private const val TS_CONTENT_TYPE = "video/mp2t"
+
+    /** About ten seconds of a typical HLS rendition, so the renderer's first read is not starved. */
+    private const val HLS_HEAD_START_BYTES = 512L * 1024
+    private const val HLS_START_TIMEOUT_MS = 30_000L
+    private const val HLS_START_POLL_MS = 250L
+
     private var appContext: Context? = null
     private var processor: CastMediaProcessor? = null
     private val server = CastLocalServer()
     private var publishedId: String? = null
     private var workingFile: File? = null
+    private var liveJob: LiveRemuxJob? = null
 
     private val _status = MutableStateFlow<CastDeliveryStatus>(CastDeliveryStatus.Idle)
     actual val status: StateFlow<CastDeliveryStatus> = _status.asStateFlow()
@@ -76,8 +88,16 @@ actual object CastDelivery {
                 ?: containerFromUrl(request.url),
             requiresLocalServer = !request.sourceReachableByReceiver,
         )
+        val settings = NuvioEnhancedSettingsRepository.run {
+            ensureLoaded()
+            uiState.value
+        }
+        val hlsAsTs = receiver.directPlayOnly &&
+            directPlan.targetContainer == CastContainer.HLS &&
+            shouldConvertHls(settings)
         val plan = when {
-            probe == null || receiver.directPlayOnly -> directPlan
+            hlsAsTs || probe == null -> directPlan
+            receiver.directPlayOnly && !settings.castAlwaysConvert -> directPlan
             else -> CastDeliveryPlanner.plan(probe, capabilities, request.sourceReachableByReceiver)
         }
 
@@ -89,7 +109,12 @@ actual object CastDelivery {
         val contentUrl: String
         val contentType: String
 
-        if (plan.mode == CastDeliveryMode.DIRECT) {
+        if (hlsAsTs) {
+            contentType = TS_CONTENT_TYPE
+            contentUrl = startHlsAsTs(context, request).getOrElse { error ->
+                return fail(error.message ?: "Could not convert this M3U8 stream for casting")
+            }
+        } else if (plan.mode == CastDeliveryMode.DIRECT) {
             contentType = contentTypeFor(plan.targetContainer)
             contentUrl = if (plan.requiresLocalServer) {
                 val id = newId()
@@ -150,7 +175,7 @@ actual object CastDelivery {
 
         return result.fold(
             onSuccess = {
-                _status.value = CastDeliveryStatus.Playing(plan.mode)
+                _status.value = CastDeliveryStatus.Playing(if (hlsAsTs) CastDeliveryMode.REMUX else plan.mode)
                 Result.success(Unit)
             },
             onFailure = { error -> fail(error.message ?: "The TV refused the stream") },
@@ -163,7 +188,62 @@ actual object CastDelivery {
         _status.value = CastDeliveryStatus.Idle
     }
 
+    /**
+     * Whether to repackage an M3U8 stream for a DLNA renderer, per the Casting settings: never
+     * while "Convert M3U8" is off, otherwise always or after asking.
+     */
+    private suspend fun shouldConvertHls(settings: NuvioEnhancedSettingsUiState): Boolean {
+        if (!settings.castConvertHls) return false
+        if (!settings.castConvertHlsAsk) return true
+        return CastConversionPrompt.ask(
+            title = "Convert M3U8?",
+            message = "This is an M3U8 stream, which many TVs cannot play. Convert it to a TS stream on your phone?",
+            confirmLabel = "Convert",
+            declineLabel = "Play as is",
+        )
+    }
+
+    /**
+     * Starts repackaging the M3U8 stream into a TS file and publishes it while it is still being
+     * written, once there is enough of a head start for the renderer's first read. Returns the
+     * URL to hand the renderer.
+     */
+    private suspend fun startHlsAsTs(context: Context, request: CastStreamRequest): Result<String> {
+        _status.value = CastDeliveryStatus.Preparing(CastDeliveryMode.REMUX, -1, emptyList())
+        val output = File(context.cacheDir, "cast/${newId()}.ts")
+        workingFile = output
+        val job = startHlsToTsRemux(request.url, request.headers, output)
+            ?: return Result.failure(IllegalStateException("This build cannot convert M3U8 streams"))
+        liveJob = job
+
+        val started = try {
+            withTimeoutOrNull(HLS_START_TIMEOUT_MS) {
+                while (output.length() < HLS_HEAD_START_BYTES && !job.isFinished) delay(HLS_START_POLL_MS)
+                true
+            }
+        } catch (cancelled: CancellationException) {
+            job.cancel()
+            throw cancelled
+        }
+        job.failure?.let { detail ->
+            Log.w(TAG, "M3U8 conversion failed: $detail")
+            return Result.failure(IllegalStateException("Could not convert this M3U8 stream for casting"))
+        }
+        if (started == null) {
+            job.cancel()
+            return Result.failure(IllegalStateException("The M3U8 stream did not start in time"))
+        }
+
+        val id = newId()
+        publishedId = id
+        val url = server.publish(id, CastLocalServer.Payload.GrowingFile(output, TS_CONTENT_TYPE, job))
+            ?: return Result.failure(IllegalStateException("Phone is not on a network the TV can reach"))
+        return Result.success(url)
+    }
+
     private fun releasePrevious() {
+        liveJob?.cancel()
+        liveJob = null
         publishedId?.let(server::unpublish)
         publishedId = null
         workingFile?.let { file -> runCatching { if (file.exists()) file.delete() } }

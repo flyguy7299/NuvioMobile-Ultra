@@ -465,6 +465,48 @@ private fun NuvioEnhancedSettingsPageContent(
             }
         }
 
+        if (!isIos) {
+            SettingsSection(
+                title = stringResource(Res.string.nuvio_enhanced_section_casting),
+                isTablet = isTablet,
+            ) {
+                SettingsGroup(isTablet = isTablet) {
+                    SettingsSwitchRow(
+                        title = stringResource(Res.string.nuvio_enhanced_cast_always_convert_title),
+                        description = stringResource(Res.string.nuvio_enhanced_cast_always_convert_desc),
+                        checked = settings.castAlwaysConvert,
+                        isTablet = isTablet,
+                        highlighted = isNew(NuvioEnhancedFeature.CastConversion),
+                        onCheckedChange = {
+                            markSeen(NuvioEnhancedFeature.CastConversion)
+                            NuvioEnhancedSettingsRepository.setCastAlwaysConvert(it)
+                        },
+                    )
+                    SettingsGroupDivider(isTablet = isTablet)
+                    SettingsSwitchRow(
+                        title = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_title),
+                        description = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_desc),
+                        checked = settings.castConvertHls,
+                        isTablet = isTablet,
+                        highlighted = isNew(NuvioEnhancedFeature.CastConversion),
+                        onCheckedChange = {
+                            markSeen(NuvioEnhancedFeature.CastConversion)
+                            NuvioEnhancedSettingsRepository.setCastConvertHls(it)
+                        },
+                    )
+                    SettingsGroupDivider(isTablet = isTablet)
+                    SettingsSwitchRow(
+                        title = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_ask_title),
+                        description = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_ask_desc),
+                        checked = settings.castConvertHlsAsk,
+                        enabled = settings.castConvertHls,
+                        isTablet = isTablet,
+                        onCheckedChange = NuvioEnhancedSettingsRepository::setCastConvertHlsAsk,
+                    )
+                }
+            }
+        }
+
         SettingsSection(
             title = stringResource(Res.string.nuvio_enhanced_section_hero_experience),
             isTablet = isTablet,

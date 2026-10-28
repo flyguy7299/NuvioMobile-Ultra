@@ -17,3 +17,10 @@ internal fun createFFmpegCastProcessor(context: Context): CastMediaProcessor? = 
  * does everything", which is exactly right here.
  */
 internal fun ffmpegCapabilityReport(): FFmpegCapabilityReport? = null
+
+/** Null: merging HLS renditions into one TS stream needs FFmpeg. */
+internal fun startHlsToTsRemux(
+    sourceUrl: String,
+    headers: Map<String, String>,
+    output: java.io.File,
+): LiveRemuxJob? = null

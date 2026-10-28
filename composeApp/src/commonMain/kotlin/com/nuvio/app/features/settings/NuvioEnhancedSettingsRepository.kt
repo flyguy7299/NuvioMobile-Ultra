@@ -43,6 +43,9 @@ internal data class NuvioEnhancedSettingsUiState(
     val featureHighlightsEnabled: Boolean = true,
     val discordWelcomeSeen: Boolean = false,
     val seenFeatureIds: Set<String> = emptySet(),
+    val castAlwaysConvert: Boolean = false,
+    val castConvertHls: Boolean = false,
+    val castConvertHlsAsk: Boolean = true,
 ) {
     fun isNew(feature: NuvioEnhancedFeature): Boolean =
         featureHighlightsEnabled && feature.id !in seenFeatureIds
@@ -91,6 +94,7 @@ internal enum class NuvioEnhancedFeature(val id: String) {
     StreamSourcePinning("stream_source_pinning"),
     BackgroundStreamPrefetch("background_stream_prefetch"),
     ContentWarnings("content_warnings"),
+    CastConversion("cast_conversion"),
 }
 
 @Serializable
@@ -128,6 +132,9 @@ private data class StoredNuvioEnhancedSettings(
     val featureHighlightsEnabled: Boolean = true,
     val discordWelcomeSeen: Boolean = false,
     val seenFeatureIds: Set<String> = emptySet(),
+    val castAlwaysConvert: Boolean = false,
+    val castConvertHls: Boolean = false,
+    val castConvertHlsAsk: Boolean = true,
 )
 
 internal object NuvioEnhancedSettingsRepository {
@@ -317,6 +324,18 @@ internal object NuvioEnhancedSettingsRepository {
         copy(featureHighlightsEnabled = enabled)
     }
 
+    fun setCastAlwaysConvert(enabled: Boolean) = update {
+        copy(castAlwaysConvert = enabled)
+    }
+
+    fun setCastConvertHls(enabled: Boolean) = update {
+        copy(castConvertHls = enabled)
+    }
+
+    fun setCastConvertHlsAsk(enabled: Boolean) = update {
+        copy(castConvertHlsAsk = enabled)
+    }
+
     fun markDiscordWelcomeSeen() = update {
         copy(discordWelcomeSeen = true)
     }
@@ -379,6 +398,9 @@ internal object NuvioEnhancedSettingsRepository {
             featureHighlightsEnabled = stored.featureHighlightsEnabled,
             discordWelcomeSeen = stored.discordWelcomeSeen,
             seenFeatureIds = stored.seenFeatureIds,
+            castAlwaysConvert = stored.castAlwaysConvert,
+            castConvertHls = stored.castConvertHls,
+            castConvertHlsAsk = stored.castConvertHlsAsk,
         )
     }
 

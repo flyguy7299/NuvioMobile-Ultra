@@ -78,6 +78,68 @@ private val cachedReport: FFmpegCapabilityReport? by lazy {
 }
 
 /**
+ * Starts repackaging an HLS stream into one continuous MPEG-TS file at [output], returning as
+ * soon as FFmpeg is running so the file can be served while it grows.
+ *
+ * Plenty of DLNA renderers (Hisense's among them) only take a single file and refuse a playlist.
+ * Dailymotion-style HLS makes this more than concatenating segments: the segments are fMP4 and
+ * audio is a separate rendition, so FFmpeg has to demux both and remux them together. No stream
+ * is mapped explicitly, so FFmpeg's default selection takes the highest-resolution video and the
+ * best audio across all variants. Copying only, never encoding, keeps it far ahead of playback.
+ */
+internal fun startHlsToTsRemux(
+    sourceUrl: String,
+    headers: Map<String, String>,
+    output: File,
+): LiveRemuxJob? {
+    output.parentFile?.mkdirs()
+    if (output.exists()) output.delete()
+
+    val parts = mutableListOf("-hide_banner")
+    if (headers.isNotEmpty()) {
+        val joined = headers.entries.joinToString("") { "${it.key}: ${it.value}\r\n" }
+        parts += listOf("-headers", quoteArg(joined))
+    }
+    parts += listOf("-i", quoteArg(sourceUrl))
+    // WebVTT and ID3 tracks cannot be copied into MPEG-TS, and would fail the whole job.
+    parts += listOf("-c", "copy", "-sn", "-dn")
+    parts += listOf("-f", "mpegts", "-y", quoteArg(output.absolutePath))
+    val command = parts.joinToString(" ")
+    Log.i(TAG, "ffmpeg (live) $command")
+
+    val job = FFmpegLiveRemuxJob()
+    val session = FFmpegKit.executeAsync(
+        command,
+        { completed ->
+            job.failure = if (ReturnCode.isSuccess(completed.returnCode) || ReturnCode.isCancel(completed.returnCode)) {
+                null
+            } else {
+                completed.failStackTrace
+                    ?: completed.allLogsAsString?.takeLast(LOG_TAIL_CHARS)
+                    ?: "ffmpeg exited with ${completed.returnCode}"
+            }
+            job.isFinished = true
+        },
+        { log -> Log.v(TAG, log.message) },
+        null,
+    )
+    job.sessionId = session.sessionId
+    return job
+}
+
+private class FFmpegLiveRemuxJob : LiveRemuxJob {
+    @Volatile var sessionId: Long? = null
+    @Volatile override var isFinished: Boolean = false
+    @Volatile override var failure: String? = null
+
+    override fun cancel() {
+        sessionId?.let { FFmpegKit.cancel(it) }
+    }
+}
+
+private fun quoteArg(value: String) = "'" + value.replace("'", "'\\''") + "'"
+
+/**
  * FFmpeg-backed processor.
  *
  * This is what closes the gap left by Media3 Transformer: Transformer can only decode what

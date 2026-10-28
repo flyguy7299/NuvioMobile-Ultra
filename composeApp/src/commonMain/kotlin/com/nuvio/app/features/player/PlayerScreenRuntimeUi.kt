@@ -10,7 +10,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import com.nuvio.app.features.cast.ui.castingAvailable
 import com.nuvio.app.features.cast.ui.CastDevicePickerDialog
+import com.nuvio.app.features.cast.ui.CastConversionPromptDialog
 import com.nuvio.app.features.cast.ui.CastDeliveryEffect
+import com.nuvio.app.features.cast.ui.CastStatusBanner
 import com.nuvio.app.features.cast.ui.CastReceiver
 import com.nuvio.app.features.cast.CastStreamRequest
 import com.nuvio.app.features.cast.CastPlatform
@@ -785,6 +787,8 @@ private fun PlayerScreenRuntime.RenderCastPicker() {
         request = castRequest,
         onFinished = { result -> if (result.isSuccess) playerController?.pause() },
     )
+    CastConversionPromptDialog()
+    CastStatusBanner()
 }
 
 /**

@@ -54,6 +54,17 @@ class CastLocalServer {
             override val contentType: String,
             val headers: Map<String, String>,
         ) : Payload
+
+        /**
+         * A file [job] is still writing. Until the job ends it is streamed from the start and
+         * followed as it grows, with no length and no ranges, the way a live MPEG-TS stream is
+         * served; once the job has completed it is just a [LocalFile].
+         */
+        data class GrowingFile(
+            val file: File,
+            override val contentType: String,
+            val job: LiveRemuxJob,
+        ) : Payload
     }
 
     val port: Int
@@ -169,6 +180,57 @@ class CastLocalServer {
         when (payload) {
             is Payload.LocalFile -> serveFile(payload, rangeHeader, method == "HEAD", output)
             is Payload.Proxy -> serveProxy(payload, rangeHeader, method == "HEAD", output)
+            is Payload.GrowingFile -> serveGrowingFile(payload, rangeHeader, method == "HEAD", output)
+        }
+    }
+
+    private fun serveGrowingFile(
+        payload: Payload.GrowingFile,
+        rangeHeader: String?,
+        headOnly: Boolean,
+        output: OutputStream,
+    ) {
+        val job = payload.job
+        if (job.isFinished && job.failure == null) {
+            return serveFile(Payload.LocalFile(payload.file, payload.contentType), rangeHeader, headOnly, output)
+        }
+        writeHeaders(
+            output,
+            status = 200,
+            reason = "OK",
+            contentType = payload.contentType,
+            contentLength = null,
+            contentRange = null,
+            seekable = false,
+        )
+        if (headOnly) return
+
+        val buffer = ByteArray(BUFFER_BYTES)
+        try {
+            RandomAccessFile(payload.file, "r").use { raf ->
+                while (true) {
+                    val got = raf.read(buffer)
+                    if (got > 0) {
+                        output.write(buffer, 0, got)
+                        continue
+                    }
+                    // Checked after an empty read, then read once more, so the bytes written
+                    // between that read and the job finishing are not cut off.
+                    if (job.isFinished) {
+                        val tail = raf.read(buffer)
+                        if (tail > 0) {
+                            output.write(buffer, 0, tail)
+                            continue
+                        }
+                        break
+                    }
+                    output.flush()
+                    Thread.sleep(GROWING_FILE_POLL_MS)
+                }
+            }
+            output.flush()
+        } catch (_: IOException) {
+            // Receiver hung up.
         }
     }
 
@@ -298,12 +360,18 @@ class CastLocalServer {
         contentType: String,
         contentLength: Long?,
         contentRange: String?,
+        seekable: Boolean = true,
     ) {
         val builder = StringBuilder()
             .append("HTTP/1.1 ").append(status).append(' ').append(reason).append(CRLF)
             .append("Content-Type: ").append(contentType).append(CRLF)
-            .append("Accept-Ranges: bytes").append(CRLF)
+            .append("Accept-Ranges: ").append(if (seekable) "bytes" else "none").append(CRLF)
             .append("Connection: close").append(CRLF)
+            // DLNA renderers (Samsung, LG, Hisense) may refuse a stream that lacks these; other
+            // clients ignore them. OP=01 advertises byte seeking, OP=00 a stream that has none.
+            .append("transferMode.dlna.org: Streaming").append(CRLF)
+            .append("contentFeatures.dlna.org: DLNA.ORG_OP=").append(if (seekable) "01" else "00")
+            .append(";DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000").append(CRLF)
         contentLength?.let { builder.append("Content-Length: ").append(it).append(CRLF) }
         contentRange?.let { builder.append("Content-Range: ").append(it).append(CRLF) }
         builder.append(CRLF)
@@ -333,5 +401,6 @@ class CastLocalServer {
         const val SOCKET_TIMEOUT_MS = 30_000
         const val CONNECT_TIMEOUT_MS = 15_000
         const val MAX_HEADER_LENGTH = 8 * 1024
+        const val GROWING_FILE_POLL_MS = 200L
     }
 }

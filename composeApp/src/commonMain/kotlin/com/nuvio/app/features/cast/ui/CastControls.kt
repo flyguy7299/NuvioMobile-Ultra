@@ -6,7 +6,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -19,8 +21,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Popup
 import com.nuvio.app.features.cast.CastConnectionState
+import com.nuvio.app.features.cast.CastConversionPrompt
+import kotlinx.coroutines.delay
 import com.nuvio.app.features.cast.CastDelivery
 import com.nuvio.app.features.cast.CastDeliveryMode
 import com.nuvio.app.features.cast.CastDeliveryStatus
@@ -202,6 +208,62 @@ fun CastDeliveryEffect(
         onFinished(CastDelivery.cast(target))
     }
 }
+
+/** Shows whatever [CastConversionPrompt] is currently asking, while delivery waits on it. */
+@Composable
+fun CastConversionPromptDialog() {
+    val request by CastConversionPrompt.pending.collectAsState()
+    val pending = request ?: return
+    AlertDialog(
+        // Dismissing counts as declining: the cast carries on with the original stream.
+        onDismissRequest = { CastConversionPrompt.answer(false) },
+        title = { Text(pending.title) },
+        text = { Text(pending.message) },
+        confirmButton = {
+            TextButton(onClick = { CastConversionPrompt.answer(true) }) { Text(pending.confirmLabel) }
+        },
+        dismissButton = {
+            TextButton(onClick = { CastConversionPrompt.answer(false) }) { Text(pending.declineLabel) }
+        },
+    )
+}
+
+/**
+ * A small banner at the top of the screen with [castStatusMessage]: what the cast is doing while
+ * it probes or converts, and why it failed. Without it a slow conversion or a refusal from the TV
+ * looked exactly like nothing happening. A failure stays up for a few seconds, then clears.
+ */
+@Composable
+fun CastStatusBanner() {
+    val status by CastDelivery.status.collectAsState()
+    val message = castStatusMessage()
+    var dismissedFailure by remember { mutableStateOf<CastDeliveryStatus.Failed?>(null) }
+    val failure = status as? CastDeliveryStatus.Failed
+
+    LaunchedEffect(failure) {
+        if (failure != null) {
+            delay(FAILURE_BANNER_MS)
+            dismissedFailure = failure
+        }
+    }
+
+    if (message == null || (failure != null && failure === dismissedFailure)) return
+    Popup(alignment = Alignment.TopCenter, offset = IntOffset(0, 48)) {
+        Surface(
+            shape = RoundedCornerShape(50),
+            color = if (failure != null) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant,
+            tonalElevation = 4.dp,
+        ) {
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+        }
+    }
+}
+
+private const val FAILURE_BANNER_MS = 8_000L
 
 /** One-line human summary of the delivery status, for a toast or overlay. */
 @Composable
