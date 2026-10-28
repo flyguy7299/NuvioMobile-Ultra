@@ -14,6 +14,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
@@ -44,7 +45,16 @@ actual object CastDelivery {
         appContext = context.applicationContext
     }
 
-    actual suspend fun cast(request: CastStreamRequest): Result<Unit> {
+    actual suspend fun cast(request: CastStreamRequest): Result<Unit> = try {
+        deliver(request)
+    } catch (cancelled: CancellationException) {
+        // Leaving the player mid-cast would otherwise strand the status at Probing/Preparing,
+        // which the player's status banner then shows the next time it opens.
+        _status.value = CastDeliveryStatus.Idle
+        throw cancelled
+    }
+
+    private suspend fun deliver(request: CastStreamRequest): Result<Unit> {
         val context = appContext
             ?: return fail("Casting is not initialised")
 
@@ -166,7 +176,9 @@ actual object CastDelivery {
                 title = request.title,
                 subtitle = request.subtitle,
                 posterUrl = request.posterUrl,
-                startPositionMs = request.startPositionMs,
+                // A converted M3U8 stream already starts at the resume point and cannot be
+                // seeked, so the renderer must not be asked to seek again.
+                startPositionMs = if (hlsAsTs) 0L else request.startPositionMs,
                 durationMs = probe?.durationMs,
                 isLive = probe?.isLive == true && probe.durationMs == null,
                 subtitles = request.subtitles,
@@ -212,7 +224,8 @@ actual object CastDelivery {
         _status.value = CastDeliveryStatus.Preparing(CastDeliveryMode.REMUX, -1, emptyList())
         val output = File(context.cacheDir, "cast/${newId()}.ts")
         workingFile = output
-        val job = startHlsToTsRemux(request.url, request.headers, output)
+        val inputs = withContext(Dispatchers.IO) { selectHlsInputs(request.url, request.headers) }
+        val job = startHlsToTsRemux(inputs, request.headers, request.startPositionMs, output)
             ?: return Result.failure(IllegalStateException("This build cannot convert M3U8 streams"))
         liveJob = job
 
@@ -251,6 +264,9 @@ actual object CastDelivery {
     }
 
     private fun fail(message: String): Result<Unit> {
+        // Nothing failed casts leave behind is still wanted, and a live remux left running would
+        // keep downloading the whole stream into the cache.
+        releasePrevious()
         _status.value = CastDeliveryStatus.Failed(message)
         return Result.failure(IllegalStateException(message))
     }

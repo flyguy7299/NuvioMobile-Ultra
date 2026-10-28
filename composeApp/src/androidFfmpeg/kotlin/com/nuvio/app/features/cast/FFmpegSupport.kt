@@ -83,33 +83,56 @@ private val cachedReport: FFmpegCapabilityReport? by lazy {
  *
  * Plenty of DLNA renderers (Hisense's among them) only take a single file and refuse a playlist.
  * Dailymotion-style HLS makes this more than concatenating segments: the segments are fMP4 and
- * audio is a separate rendition, so FFmpeg has to demux both and remux them together. No stream
- * is mapped explicitly, so FFmpeg's default selection takes the highest-resolution video and the
- * best audio across all variants. Copying only, never encoding, keeps it far ahead of playback.
+ * audio is a separate rendition, so FFmpeg has to demux both and remux them together. The variant
+ * is chosen beforehand ([selectHlsInputs]) so FFmpeg opens only the playlists it uses. Copying
+ * only, never encoding, keeps it far ahead of playback.
+ *
+ * The output cannot be seeked, so a resume position is applied here, on the input side.
  */
 internal fun startHlsToTsRemux(
-    sourceUrl: String,
+    inputs: HlsInputs,
     headers: Map<String, String>,
+    startPositionMs: Long,
     output: File,
 ): LiveRemuxJob? {
     output.parentFile?.mkdirs()
     if (output.exists()) output.delete()
 
-    val parts = mutableListOf("-hide_banner")
-    if (headers.isNotEmpty()) {
-        val joined = headers.entries.joinToString("") { "${it.key}: ${it.value}\r\n" }
-        parts += listOf("-headers", quoteArg(joined))
+    // Input options (headers, start position) have to precede each input they apply to.
+    val inputOptions = buildList {
+        if (headers.isNotEmpty()) {
+            add("-headers")
+            add(headers.entries.joinToString("") { "${it.key}: ${it.value}\r\n" })
+        }
+        if (startPositionMs > 0) {
+            add("-ss")
+            add((startPositionMs / 1000.0).toString())
+        }
     }
-    parts += listOf("-i", quoteArg(sourceUrl))
-    // WebVTT and ID3 tracks cannot be copied into MPEG-TS, and would fail the whole job.
-    parts += listOf("-c", "copy", "-sn", "-dn")
-    parts += listOf("-f", "mpegts", "-y", quoteArg(output.absolutePath))
-    val command = parts.joinToString(" ")
-    Log.i(TAG, "ffmpeg (live) $command")
+    val args = buildList {
+        add("-hide_banner")
+        addAll(inputOptions)
+        add("-i")
+        add(inputs.video)
+        if (inputs.audio != null) {
+            addAll(inputOptions)
+            add("-i")
+            add(inputs.audio)
+            addAll(listOf("-map", "0:v:0", "-map", "1:a:0"))
+        } else {
+            addAll(listOf("-map", "0:v:0", "-map", "0:a:0?"))
+        }
+        // Subtitles and ID3 data cannot be copied into MPEG-TS, and would fail the whole job.
+        addAll(listOf("-c", "copy", "-sn", "-dn"))
+        addAll(listOf("-f", "mpegts", "-y", output.absolutePath))
+    }
+    // Not the command itself: the URLs carry signed tokens and the headers may carry credentials.
+    Log.i(TAG, "ffmpeg (live) remuxing HLS to TS, separate audio: ${inputs.audio != null}")
 
     val job = FFmpegLiveRemuxJob()
-    val session = FFmpegKit.executeAsync(
-        command,
+    // Arguments rather than a command string, so no URL or header needs shell-style quoting.
+    val session = FFmpegKit.executeWithArgumentsAsync(
+        args.toTypedArray(),
         { completed ->
             job.failure = if (ReturnCode.isSuccess(completed.returnCode) || ReturnCode.isCancel(completed.returnCode)) {
                 null
@@ -120,7 +143,9 @@ internal fun startHlsToTsRemux(
             }
             job.isFinished = true
         },
-        { log -> Log.v(TAG, log.message) },
+        // FFmpeg logs every segment URL it opens, signed tokens included, so nothing is
+        // forwarded to logcat; a failure still reports the tail of the log above.
+        { },
         null,
     )
     job.sessionId = session.sessionId
@@ -136,8 +161,6 @@ private class FFmpegLiveRemuxJob : LiveRemuxJob {
         sessionId?.let { FFmpegKit.cancel(it) }
     }
 }
-
-private fun quoteArg(value: String) = "'" + value.replace("'", "'\\''") + "'"
 
 /**
  * FFmpeg-backed processor.

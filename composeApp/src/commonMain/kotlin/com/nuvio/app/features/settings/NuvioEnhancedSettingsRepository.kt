@@ -94,7 +94,6 @@ internal enum class NuvioEnhancedFeature(val id: String) {
     StreamSourcePinning("stream_source_pinning"),
     BackgroundStreamPrefetch("background_stream_prefetch"),
     ContentWarnings("content_warnings"),
-    CastConversion("cast_conversion"),
 }
 
 @Serializable

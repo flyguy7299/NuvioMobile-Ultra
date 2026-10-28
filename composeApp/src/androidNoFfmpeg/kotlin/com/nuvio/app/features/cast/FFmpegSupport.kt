@@ -20,7 +20,8 @@ internal fun ffmpegCapabilityReport(): FFmpegCapabilityReport? = null
 
 /** Null: merging HLS renditions into one TS stream needs FFmpeg. */
 internal fun startHlsToTsRemux(
-    sourceUrl: String,
+    inputs: HlsInputs,
     headers: Map<String, String>,
+    startPositionMs: Long,
     output: java.io.File,
 ): LiveRemuxJob? = null

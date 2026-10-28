@@ -476,11 +476,7 @@ private fun NuvioEnhancedSettingsPageContent(
                         description = stringResource(Res.string.nuvio_enhanced_cast_always_convert_desc),
                         checked = settings.castAlwaysConvert,
                         isTablet = isTablet,
-                        highlighted = isNew(NuvioEnhancedFeature.CastConversion),
-                        onCheckedChange = {
-                            markSeen(NuvioEnhancedFeature.CastConversion)
-                            NuvioEnhancedSettingsRepository.setCastAlwaysConvert(it)
-                        },
+                        onCheckedChange = NuvioEnhancedSettingsRepository::setCastAlwaysConvert,
                     )
                     SettingsGroupDivider(isTablet = isTablet)
                     SettingsSwitchRow(
@@ -488,11 +484,7 @@ private fun NuvioEnhancedSettingsPageContent(
                         description = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_desc),
                         checked = settings.castConvertHls,
                         isTablet = isTablet,
-                        highlighted = isNew(NuvioEnhancedFeature.CastConversion),
-                        onCheckedChange = {
-                            markSeen(NuvioEnhancedFeature.CastConversion)
-                            NuvioEnhancedSettingsRepository.setCastConvertHls(it)
-                        },
+                        onCheckedChange = NuvioEnhancedSettingsRepository::setCastConvertHls,
                     )
                     SettingsGroupDivider(isTablet = isTablet)
                     SettingsSwitchRow(

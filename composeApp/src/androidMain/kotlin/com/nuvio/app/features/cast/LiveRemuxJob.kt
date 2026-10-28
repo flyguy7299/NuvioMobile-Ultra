@@ -7,7 +7,7 @@ package com.nuvio.app.features.cast
  * for sources a renderer cannot take at all — an M3U8 playlist on a TV that only plays single
  * files — where waiting for the end is not an option. See [startHlsToTsRemux].
  */
-internal interface LiveRemuxJob {
+interface LiveRemuxJob {
     /** True once the job has stopped, whether it completed or failed. */
     val isFinished: Boolean
 
