@@ -47,6 +47,7 @@ internal data class NuvioEnhancedSettingsUiState(
     val castAlwaysConvertAsk: Boolean = true,
     val castConvertHls: Boolean = false,
     val castConvertHlsAsk: Boolean = true,
+    val castEmbedSubtitles: Boolean = false,
 ) {
     fun isNew(feature: NuvioEnhancedFeature): Boolean =
         featureHighlightsEnabled && feature.id !in seenFeatureIds
@@ -136,6 +137,7 @@ private data class StoredNuvioEnhancedSettings(
     val castAlwaysConvertAsk: Boolean = true,
     val castConvertHls: Boolean = false,
     val castConvertHlsAsk: Boolean = true,
+    val castEmbedSubtitles: Boolean = false,
 )
 
 internal object NuvioEnhancedSettingsRepository {
@@ -341,6 +343,10 @@ internal object NuvioEnhancedSettingsRepository {
         copy(castConvertHlsAsk = enabled)
     }
 
+    fun setCastEmbedSubtitles(enabled: Boolean) = update {
+        copy(castEmbedSubtitles = enabled)
+    }
+
     fun markDiscordWelcomeSeen() = update {
         copy(discordWelcomeSeen = true)
     }
@@ -407,6 +413,7 @@ internal object NuvioEnhancedSettingsRepository {
             castAlwaysConvertAsk = stored.castAlwaysConvertAsk,
             castConvertHls = stored.castConvertHls,
             castConvertHlsAsk = stored.castConvertHlsAsk,
+            castEmbedSubtitles = stored.castEmbedSubtitles,
         )
     }
 

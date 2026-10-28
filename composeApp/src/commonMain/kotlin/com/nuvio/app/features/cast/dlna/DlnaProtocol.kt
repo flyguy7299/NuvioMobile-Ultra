@@ -284,12 +284,13 @@ object DlnaActions {
         contentType: String,
         title: String,
         subtitleUrl: String? = null,
+        subtitleMimeType: String = "text/vtt",
     ): DlnaSoapCall = soapCall(
         AV_TRANSPORT_SERVICE_TYPE, "SetAVTransportURI",
         linkedMapOf(
             "InstanceID" to "0",
             "CurrentURI" to contentUrl,
-            "CurrentURIMetaData" to buildDidlLite(title, contentUrl, contentType, subtitleUrl),
+            "CurrentURIMetaData" to buildDidlLite(title, contentUrl, contentType, subtitleUrl, subtitleMimeType),
         ),
     )
 

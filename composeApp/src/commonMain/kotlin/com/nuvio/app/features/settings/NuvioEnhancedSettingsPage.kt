@@ -67,6 +67,7 @@ import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.core.ui.NuvioTokens
 import com.nuvio.app.core.ui.appIconPainter
 import com.nuvio.app.core.ui.nuvio
+import com.nuvio.app.features.cast.CastCapabilities
 import com.nuvio.app.features.details.MetaScreenSettingsRepository
 import com.nuvio.app.features.home.HomeCatalogSettingsRepository
 import com.nuvio.app.features.player.AndroidPlaybackEngine
@@ -487,23 +488,34 @@ private fun NuvioEnhancedSettingsPageContent(
                         isTablet = isTablet,
                         onCheckedChange = NuvioEnhancedSettingsRepository::setCastAlwaysConvertAsk,
                     )
-                    SettingsGroupDivider(isTablet = isTablet)
-                    SettingsSwitchRow(
-                        title = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_title),
-                        description = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_desc),
-                        checked = settings.castConvertHls,
-                        isTablet = isTablet,
-                        onCheckedChange = NuvioEnhancedSettingsRepository::setCastConvertHls,
-                    )
-                    SettingsGroupDivider(isTablet = isTablet)
-                    SettingsSwitchRow(
-                        title = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_ask_title),
-                        description = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_ask_desc),
-                        checked = settings.castConvertHlsAsk,
-                        enabled = settings.castConvertHls,
-                        isTablet = isTablet,
-                        onCheckedChange = NuvioEnhancedSettingsRepository::setCastConvertHlsAsk,
-                    )
+                    // Live remuxing needs FFmpeg, which only some Android builds carry.
+                    if (CastCapabilities.liveRemux) {
+                        SettingsGroupDivider(isTablet = isTablet)
+                        SettingsSwitchRow(
+                            title = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_title),
+                            description = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_desc),
+                            checked = settings.castConvertHls,
+                            isTablet = isTablet,
+                            onCheckedChange = NuvioEnhancedSettingsRepository::setCastConvertHls,
+                        )
+                        SettingsGroupDivider(isTablet = isTablet)
+                        SettingsSwitchRow(
+                            title = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_ask_title),
+                            description = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_ask_desc),
+                            checked = settings.castConvertHlsAsk,
+                            enabled = settings.castConvertHls,
+                            isTablet = isTablet,
+                            onCheckedChange = NuvioEnhancedSettingsRepository::setCastConvertHlsAsk,
+                        )
+                        SettingsGroupDivider(isTablet = isTablet)
+                        SettingsSwitchRow(
+                            title = stringResource(Res.string.nuvio_enhanced_cast_embed_subtitles_title),
+                            description = stringResource(Res.string.nuvio_enhanced_cast_embed_subtitles_desc),
+                            checked = settings.castEmbedSubtitles,
+                            isTablet = isTablet,
+                            onCheckedChange = NuvioEnhancedSettingsRepository::setCastEmbedSubtitles,
+                        )
+                    }
                 }
             }
         }

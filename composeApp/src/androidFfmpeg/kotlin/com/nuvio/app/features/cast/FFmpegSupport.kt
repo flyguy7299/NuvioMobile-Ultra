@@ -128,7 +128,57 @@ internal fun startHlsToTsRemux(
     }
     // Not the command itself: the URLs carry signed tokens and the headers may carry credentials.
     Log.i(TAG, "ffmpeg (live) remuxing HLS to TS, separate audio: ${inputs.audio != null}")
+    return startLiveRemux(args)
+}
 
+/** True: this build carries FFmpeg, so live remuxing works. */
+internal const val FFMPEG_BUNDLED = true
+
+/**
+ * Starts muxing [videoUrl] together with [subtitleFile] (SRT) into one Matroska stream at
+ * [output], returning as soon as FFmpeg runs so the file can be served while it grows.
+ *
+ * For renderers that ignore an external DLNA subtitle but show a subtitle track inside MKV.
+ * Everything is copied, nothing encoded. Only the prepared subtitle is mapped, not the source's
+ * own subtitle streams, which could be in codecs MKV-on-a-TV can't show. Matroska live mode,
+ * because a normal MKV rewrites its header and index at the end, after the renderer has read
+ * them. The subtitle file is already shifted to the resume point, so only the video is seeked.
+ */
+internal fun startSubtitleMuxToMkv(
+    videoUrl: String,
+    headers: Map<String, String>,
+    startPositionMs: Long,
+    subtitleFile: File,
+    subtitleLanguage: String?,
+    output: File,
+): LiveRemuxJob? {
+    output.parentFile?.mkdirs()
+    if (output.exists()) output.delete()
+
+    val args = buildList {
+        add("-hide_banner")
+        if (headers.isNotEmpty()) {
+            add("-headers")
+            add(headers.entries.joinToString("") { "${it.key}: ${it.value}\r\n" })
+        }
+        if (startPositionMs > 0) {
+            add("-ss")
+            add((startPositionMs / 1000.0).toString())
+        }
+        add("-i")
+        add(videoUrl)
+        add("-i")
+        add(subtitleFile.absolutePath)
+        addAll(listOf("-map", "0:v:0", "-map", "0:a?", "-map", "1:0"))
+        addAll(listOf("-c", "copy", "-c:s", "srt", "-disposition:s:0", "default"))
+        subtitleLanguage?.takeIf { it.isNotBlank() }?.let { addAll(listOf("-metadata:s:s:0", "language=$it")) }
+        addAll(listOf("-f", "matroska", "-live", "1", "-y", output.absolutePath))
+    }
+    Log.i(TAG, "ffmpeg (live) muxing subtitle into MKV")
+    return startLiveRemux(args)
+}
+
+private fun startLiveRemux(args: List<String>): LiveRemuxJob {
     val job = FFmpegLiveRemuxJob()
     // Arguments rather than a command string, so no URL or header needs shell-style quoting.
     val session = FFmpegKit.executeWithArgumentsAsync(

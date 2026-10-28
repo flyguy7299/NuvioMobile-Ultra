@@ -407,6 +407,7 @@ actual object DlnaPlatform {
                     // way Chromecast's MediaTrack does, so the first track is the only one that
                     // can be offered.
                     subtitleUrl = request.subtitles.firstOrNull()?.url,
+                    subtitleMimeType = subtitleMimeType(request.subtitles.firstOrNull()?.url),
                 ),
                 timeoutMs = LOAD_TIMEOUT_MS,
             )
@@ -420,6 +421,12 @@ actual object DlnaPlatform {
             }
             Unit
         }
+    }
+
+    /** From the URL's extension, ignoring any query or fragment; SRT is what casting serves. */
+    private fun subtitleMimeType(url: String?): String {
+        val path = url?.substringBefore('?')?.substringBefore('#')?.lowercase().orEmpty()
+        return if (path.endsWith(".vtt")) "text/vtt" else "text/srt"
     }
 
     actual fun play() = fireAndForget { device -> soapPost(device.avTransportControlUrl, DlnaActions.play()) }

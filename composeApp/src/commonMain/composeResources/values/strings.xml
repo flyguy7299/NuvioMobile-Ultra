@@ -2572,6 +2572,8 @@
     <string name="nuvio_enhanced_cast_always_convert_ask_desc">Ask before converting a file, showing why it needs it, instead of always converting.</string>
     <string name="nuvio_enhanced_cast_convert_hls_title">Convert M3U8</string>
     <string name="nuvio_enhanced_cast_convert_hls_desc">Your TV may not support M3U8 video. Converting it to a TS stream on the phone lets TVs such as Hisense play it.</string>
+    <string name="nuvio_enhanced_cast_embed_subtitles_title">Put subtitles inside the video (MKV)</string>
+    <string name="nuvio_enhanced_cast_embed_subtitles_desc">For TVs that ignore separate subtitle files over DLNA. The video then plays through your phone, and seeking is not available while casting.</string>
     <string name="nuvio_enhanced_cast_convert_hls_ask_title">Ask every time</string>
     <string name="nuvio_enhanced_cast_convert_hls_ask_desc">Ask before each M3U8 cast instead of always converting.</string>
     <string name="nuvio_enhanced_player_status_overlay_title">Player status overlay</string>

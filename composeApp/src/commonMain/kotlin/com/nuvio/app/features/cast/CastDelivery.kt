@@ -36,6 +36,8 @@ data class CastStreamRequest(
     val posterUrl: String? = null,
     val startPositionMs: Long = 0L,
     val subtitles: List<CastSubtitleTrack> = emptyList(),
+    /** The player's subtitle delay; positive shows subtitles later. */
+    val subtitleDelayMs: Int = 0,
     /**
      * False for anything the receiver cannot fetch itself: loopback addresses from the torrent
      * engine, on-disk downloads, or origins that require request headers.

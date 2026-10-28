@@ -4,7 +4,9 @@ import android.content.Context
 import android.util.Log
 import com.nuvio.app.features.cast.model.CastContainer
 import com.nuvio.app.features.cast.model.CastMediaProbe
+import com.nuvio.app.features.addons.httpGetTextWithHeaders
 import com.nuvio.app.features.cast.ui.describeCastIncompatibility
+import com.nuvio.app.features.player.sanitizePlaybackHeaders
 import com.nuvio.app.features.settings.NuvioEnhancedSettingsRepository
 import com.nuvio.app.features.settings.NuvioEnhancedSettingsUiState
 import kotlinx.coroutines.CancellationException
@@ -32,6 +34,8 @@ actual object CastDelivery {
     private const val DIRECT_PLAY_PROBE_TIMEOUT_MS = 8_000L
 
     private const val TS_CONTENT_TYPE = "video/mp2t"
+    private const val MKV_CONTENT_TYPE = "video/x-matroska"
+    private const val SRT_CONTENT_TYPE = "application/x-subrip"
 
     /** About ten seconds of a typical HLS rendition, so the renderer's first read is not starved. */
     private const val HLS_HEAD_START_BYTES = 512L * 1024
@@ -44,8 +48,9 @@ actual object CastDelivery {
     private var appContext: Context? = null
     private var processor: CastMediaProcessor? = null
     private val server = CastLocalServer()
-    private var publishedId: String? = null
-    private var workingFile: File? = null
+    // Lists: one cast can serve several things at once (a video and its subtitle).
+    private val publishedIds = mutableListOf<String>()
+    private val workingFiles = mutableListOf<File>()
     private var liveJob: LiveRemuxJob? = null
 
     /** One delivery at a time: they share every field above. */
@@ -64,6 +69,7 @@ actual object CastDelivery {
         // Only files older than this moment are removed, and the moment is taken before casting
         // becomes possible (appContext is set), so a cast's own file is never older than it.
         val cutoff = System.currentTimeMillis()
+        CastCapabilities.liveRemux = FFMPEG_BUNDLED
         appContext = context.applicationContext
         val leftovers = File(context.cacheDir, "cast")
         Thread({
@@ -170,24 +176,47 @@ actual object CastDelivery {
             return fail("${receiver.name} cannot play video")
         }
 
+        // --- Subtitle -------------------------------------------------------------------
+        // DLNA only: the selected addon subtitle is converted to SRT and served from the phone,
+        // either beside the video or muxed into it ("Put subtitles inside the video"). Chromecast
+        // gets none, as before: its receiver needs WebVTT with CORS, which isn't done here.
+        val muxSubtitles = receiver.prefersDirectPlay && settings.castEmbedSubtitles && FFMPEG_BUNDLED &&
+            !hlsAsTs && plan.mode == CastDeliveryMode.DIRECT && probe?.isLive != true &&
+            request.subtitles.isNotEmpty()
+        // A stream that starts at the resume point (a live remux) needs its subtitle times shifted
+        // the same way; the renderer seeks everything else itself.
+        val subtitleFile = if (receiver.prefersDirectPlay) {
+            prepareSubtitle(context, request, originMs = if (hlsAsTs || muxSubtitles) request.startPositionMs else 0L)
+        } else {
+            null
+        }
+
         // --- Produce a playable source -------------------------------------------------
         val contentUrl: String
         val contentType: String
+        val liveRemux = hlsAsTs || (muxSubtitles && subtitleFile != null)
 
         if (hlsAsTs) {
             contentType = TS_CONTENT_TYPE
-            contentUrl = startHlsAsTs(context, request).getOrElse { error ->
+            val inputs = withContext(Dispatchers.IO) { selectHlsInputs(request.url, request.headers) }
+            contentUrl = startLiveStream(context, ".ts", contentType, "M3U8 stream") { output ->
+                startHlsToTsRemux(inputs, request.headers, request.startPositionMs, output)
+            }.getOrElse { error ->
                 return fail(error.message ?: "Could not convert this M3U8 stream for casting")
+            }
+        } else if (liveRemux && subtitleFile != null) {
+            contentType = MKV_CONTENT_TYPE
+            val language = request.subtitles.first().language
+            contentUrl = startLiveStream(context, ".mkv", contentType, "video with subtitles") { output ->
+                startSubtitleMuxToMkv(request.url, request.headers, request.startPositionMs, subtitleFile, language, output)
+            }.getOrElse { error ->
+                return fail(error.message ?: "Could not put the subtitles into the video")
             }
         } else if (plan.mode == CastDeliveryMode.DIRECT) {
             contentType = contentTypeFor(plan.targetContainer)
             contentUrl = if (plan.requiresLocalServer) {
-                val id = newId()
-                publishedId = id
-                server.publish(
-                    id,
-                    CastLocalServer.Payload.Proxy(request.url, contentType, request.headers),
-                ) ?: return fail("Phone is not on a network the TV can reach")
+                publish(CastLocalServer.Payload.Proxy(request.url, contentType, request.headers))
+                    ?: return fail("Phone is not on a network the TV can reach")
             } else {
                 request.url
             }
@@ -195,8 +224,7 @@ actual object CastDelivery {
             _status.value = CastDeliveryStatus.Preparing(plan.mode, -1, plan.reasons)
 
             val engine = processor ?: castMediaProcessor(context).also { processor = it }
-            val output = File(context.cacheDir, "cast/${newId()}.mp4")
-            workingFile = output
+            val output = newWorkingFile(context, ".mp4")
 
             val produced = engine.process(
                 sourceUrl = request.url,
@@ -217,10 +245,19 @@ actual object CastDelivery {
             }
 
             contentType = "video/mp4"
-            val id = newId()
-            publishedId = id
-            contentUrl = server.publish(id, CastLocalServer.Payload.LocalFile(produced, contentType))
+            contentUrl = publish(CastLocalServer.Payload.LocalFile(produced, contentType))
                 ?: return fail("Phone is not on a network the TV can reach")
+        }
+
+        // Beside the video unless it went inside it. Served under a ".srt" path, which is how
+        // renderers and the DIDL builder tell the subtitle format.
+        val subtitlesMuxed = liveRemux && !hlsAsTs
+        val castSubtitles = if (subtitleFile != null && !subtitlesMuxed) {
+            publish(CastLocalServer.Payload.LocalFile(subtitleFile, SRT_CONTENT_TYPE), suffix = ".srt")
+                ?.let { url -> listOf(request.subtitles.first().copy(url = url)) }
+                .orEmpty()
+        } else {
+            emptyList()
         }
 
         // --- Hand off ------------------------------------------------------------------
@@ -231,18 +268,18 @@ actual object CastDelivery {
                 title = request.title,
                 subtitle = request.subtitle,
                 posterUrl = request.posterUrl,
-                // A converted M3U8 stream already starts at the resume point and cannot be
-                // seeked, so the renderer must not be asked to seek again.
-                startPositionMs = if (hlsAsTs) 0L else request.startPositionMs,
+                // A live remux already starts at the resume point and cannot be seeked, so the
+                // renderer must not be asked to seek again.
+                startPositionMs = if (liveRemux) 0L else request.startPositionMs,
                 durationMs = probe?.durationMs,
                 isLive = probe?.isLive == true && probe.durationMs == null,
-                subtitles = request.subtitles,
+                subtitles = castSubtitles,
             ),
         )
 
         return result.fold(
             onSuccess = {
-                _status.value = CastDeliveryStatus.Playing(if (hlsAsTs) CastDeliveryMode.REMUX else plan.mode)
+                _status.value = CastDeliveryStatus.Playing(if (liveRemux) CastDeliveryMode.REMUX else plan.mode)
                 liveJob?.let(::watchLiveJob)
                 Result.success(Unit)
             },
@@ -272,8 +309,8 @@ actual object CastDelivery {
             deliveryLock.withLock {
                 // Only if this job still belongs to the current cast.
                 if (liveJob !== job) return@withLock
-                Log.w(TAG, "M3U8 conversion stopped during playback: $failure")
-                fail("The M3U8 conversion stopped during playback")
+                Log.w(TAG, "Live remux stopped during playback: $failure")
+                fail("The conversion stopped during playback")
             }
         }
     }
@@ -314,17 +351,49 @@ actual object CastDelivery {
     }
 
     /**
-     * Starts repackaging the M3U8 stream into a TS file and publishes it while it is still being
-     * written, once there is enough of a head start for the renderer's first read. Returns the
-     * URL to hand the renderer.
+     * Fetches the selected addon subtitle and writes it as SRT for a DLNA renderer, or returns
+     * null. A subtitle that can't be fetched or read never fails the cast, it just isn't sent:
+     * handing the renderer the original URL instead is no good when that URL needs headers.
      */
-    private suspend fun startHlsAsTs(context: Context, request: CastStreamRequest): Result<String> {
+    private suspend fun prepareSubtitle(context: Context, request: CastStreamRequest, originMs: Long): File? {
+        val track = request.subtitles.firstOrNull() ?: return null
+        return try {
+            val text = httpGetTextWithHeaders(track.url, sanitizePlaybackHeaders(request.headers))
+            val srt = CastSubtitleConverter.toSrt(text, track.url, request.subtitleDelayMs.toLong(), originMs)
+            if (srt == null) {
+                Log.w(TAG, "Subtitle format not recognised, casting without it")
+                return null
+            }
+            val file = newWorkingFile(context, ".srt")
+            withContext(Dispatchers.IO) {
+                file.parentFile?.mkdirs()
+                file.writeText(srt)
+            }
+            file
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not fetch the subtitle, casting without it", error)
+            null
+        }
+    }
+
+    /**
+     * Starts a live remux into a new working file and publishes it while it is still being
+     * written, once there is enough of a head start for the renderer's first read. Returns the
+     * URL to hand the renderer. [what] names the stream in error messages.
+     */
+    private suspend fun startLiveStream(
+        context: Context,
+        extension: String,
+        contentType: String,
+        what: String,
+        start: (File) -> LiveRemuxJob?,
+    ): Result<String> {
         _status.value = CastDeliveryStatus.Preparing(CastDeliveryMode.REMUX, -1, emptyList())
-        val output = File(context.cacheDir, "cast/${newId()}.ts")
-        workingFile = output
-        val inputs = withContext(Dispatchers.IO) { selectHlsInputs(request.url, request.headers) }
-        val job = startHlsToTsRemux(inputs, request.headers, request.startPositionMs, output)
-            ?: return Result.failure(IllegalStateException("This build cannot convert M3U8 streams"))
+        val output = newWorkingFile(context, extension)
+        val job = start(output)
+            ?: return Result.failure(IllegalStateException("This build cannot convert the $what"))
         liveJob = job
 
         val started = try {
@@ -347,28 +416,37 @@ actual object CastDelivery {
             throw cancelled
         }
         job.failure?.let { detail ->
-            Log.w(TAG, "M3U8 conversion failed: $detail")
-            return Result.failure(IllegalStateException("Could not convert this M3U8 stream for casting"))
+            Log.w(TAG, "Live remux failed: $detail")
+            return Result.failure(IllegalStateException("Could not prepare the $what for casting"))
         }
         if (started == null) {
             job.cancel()
-            return Result.failure(IllegalStateException("The M3U8 stream did not start in time"))
+            return Result.failure(IllegalStateException("The $what did not start in time"))
         }
 
-        val id = newId()
-        publishedId = id
-        val url = server.publish(id, CastLocalServer.Payload.GrowingFile(output, TS_CONTENT_TYPE, job))
+        val url = publish(CastLocalServer.Payload.GrowingFile(output, contentType, job))
             ?: return Result.failure(IllegalStateException("Phone is not on a network the TV can reach"))
         return Result.success(url)
     }
 
+    /** Publishes [payload] under a new route this cast owns, so [releasePrevious] removes it. */
+    private fun publish(payload: CastLocalServer.Payload, suffix: String = ""): String? {
+        val id = newId() + suffix
+        publishedIds += id
+        return server.publish(id, payload)
+    }
+
+    /** A new file in the cast cache this cast owns, so [releasePrevious] deletes it. */
+    private fun newWorkingFile(context: Context, extension: String): File =
+        File(context.cacheDir, "cast/${newId()}$extension").also { workingFiles += it }
+
     private fun releasePrevious() {
         liveJob?.cancel()
         liveJob = null
-        publishedId?.let(server::unpublish)
-        publishedId = null
-        workingFile?.let { file -> runCatching { if (file.exists()) file.delete() } }
-        workingFile = null
+        publishedIds.forEach(server::unpublish)
+        publishedIds.clear()
+        workingFiles.forEach { file -> runCatching { if (file.exists()) file.delete() } }
+        workingFiles.clear()
     }
 
     private fun fail(message: String): Result<Unit> {

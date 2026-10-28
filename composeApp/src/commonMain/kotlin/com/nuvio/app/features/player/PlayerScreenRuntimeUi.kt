@@ -15,6 +15,7 @@ import com.nuvio.app.features.cast.ui.CastDeliveryEffect
 import com.nuvio.app.features.cast.ui.CastStatusBanner
 import com.nuvio.app.features.cast.ui.CastReceiver
 import com.nuvio.app.features.cast.CastStreamRequest
+import com.nuvio.app.features.cast.CastSubtitleTrack
 import com.nuvio.app.features.cast.CastPlatform
 import com.nuvio.app.features.cast.dlna.DlnaPlatform
 import androidx.compose.runtime.remember
@@ -771,17 +772,27 @@ private fun PlayerScreenRuntime.RenderCastPicker() {
 
     // Local playback and Cast playback must not run at once, so pause the phone once the
     // television has taken over.
-    val castRequest = remember(sourceUrl, title, activeStreamTitle) {
-        CastStreamRequest(
-            url = sourceUrl,
-            headers = sourceHeaders,
-            title = title,
-            subtitle = activeStreamTitle,
-            posterUrl = args.poster,
-            startPositionMs = playbackSnapshot.positionMs,
-            sourceReachableByReceiver = isReceiverReachable(sourceUrl, sourceHeaders),
-        )
-    }
+    // Built on every recomposition rather than remembered: a remembered request carried the
+    // position from when the player opened, so a cast started mid-film resumed from there.
+    // CastDeliveryEffect only acts on a receiver or URL change, so rebuilding it is harmless.
+    // The selected addon subtitle goes along for DLNA, which converts and serves it; iOS's
+    // delivery would forward the raw addon URL, so it gets none there.
+    val castSubtitle = selectedAddonSubtitle?.takeUnless { isIos }
+    val castRequest = CastStreamRequest(
+        url = sourceUrl,
+        headers = sourceHeaders,
+        title = title,
+        subtitle = activeStreamTitle,
+        posterUrl = args.poster,
+        startPositionMs = playbackSnapshot.positionMs,
+        sourceReachableByReceiver = isReceiverReachable(sourceUrl, sourceHeaders),
+        subtitles = listOfNotNull(
+            castSubtitle?.let {
+                CastSubtitleTrack(id = it.id.hashCode().toLong(), url = it.url, language = it.language, label = it.display)
+            },
+        ),
+        subtitleDelayMs = subtitleDelayMs,
+    )
 
     CastDeliveryEffect(
         request = castRequest,
