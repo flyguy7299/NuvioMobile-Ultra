@@ -3,14 +3,20 @@ package com.nuvio.app.features.cast
 import android.content.Context
 import android.util.Log
 import com.nuvio.app.features.cast.model.CastContainer
+import com.nuvio.app.features.cast.model.CastMediaProbe
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 actual object CastDelivery {
 
     private const val TAG = "CastDelivery"
+    private const val DIRECT_PLAY_PROBE_TIMEOUT_MS = 8_000L
 
     private var appContext: Context? = null
     private var processor: CastMediaProcessor? = null
@@ -38,11 +44,27 @@ actual object CastDelivery {
 
         // --- Probe ---------------------------------------------------------------------
         _status.value = CastDeliveryStatus.Probing
-        val probe = probeCastMedia(request.url, request.headers).getOrElse { error ->
-            // A probe failure is not fatal. The receiver may well handle the stream, so fall
-            // back to an optimistic direct play rather than refusing to cast at all.
-            Log.w(TAG, "Probe failed, attempting direct play", error)
-            null
+        val probeOrNull: suspend () -> CastMediaProbe? = {
+            probeCastMedia(request.url, request.headers).getOrElse { error ->
+                // A probe failure is not fatal. The receiver may well handle the stream, so fall
+                // back to an optimistic direct play rather than refusing to cast at all.
+                Log.w(TAG, "Probe failed, attempting direct play", error)
+                null
+            }
+        }
+        val probe = if (receiver.directPlayOnly) {
+            // A direct-play receiver only uses the probe for the container and duration, so a
+            // slow origin must not hold the cast up. The extractor's blocking read cannot be
+            // interrupted, so it runs in a detached scope and is abandoned on timeout rather
+            // than waited for.
+            val pending = CoroutineScope(Dispatchers.IO).async { probeOrNull() }
+            withTimeoutOrNull(DIRECT_PLAY_PROBE_TIMEOUT_MS) { pending.await() } ?: run {
+                if (pending.isActive) Log.w(TAG, "Probe did not finish in time, attempting direct play")
+                pending.cancel()
+                null
+            }
+        } else {
+            probeOrNull()
         }
 
         val directPlan = CastDeliveryPlan(
