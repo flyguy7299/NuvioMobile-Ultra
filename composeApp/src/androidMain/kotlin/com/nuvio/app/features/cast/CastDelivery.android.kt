@@ -10,8 +10,14 @@ import com.nuvio.app.features.settings.NuvioEnhancedSettingsUiState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -28,8 +34,11 @@ actual object CastDelivery {
 
     /** About ten seconds of a typical HLS rendition, so the renderer's first read is not starved. */
     private const val HLS_HEAD_START_BYTES = 512L * 1024
+    private const val HLS_MIN_START_BYTES = 64L * 1024
+    private const val HLS_MIN_START_WAIT_MS = 5_000L
     private const val HLS_START_TIMEOUT_MS = 30_000L
     private const val HLS_START_POLL_MS = 250L
+    private const val LIVE_JOB_WATCH_MS = 1_000L
 
     private var appContext: Context? = null
     private var processor: CastMediaProcessor? = null
@@ -38,21 +47,44 @@ actual object CastDelivery {
     private var workingFile: File? = null
     private var liveJob: LiveRemuxJob? = null
 
+    /** One delivery at a time: they share every field above. */
+    private val deliveryLock = Mutex()
+    @Volatile private var activeDelivery: Job? = null
+    private val watchScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
     private val _status = MutableStateFlow<CastDeliveryStatus>(CastDeliveryStatus.Idle)
     actual val status: StateFlow<CastDeliveryStatus> = _status.asStateFlow()
 
     /** Android-only entry point; call alongside [CastPlatform.initialize]. */
     fun initialize(context: Context) {
         appContext = context.applicationContext
+        // Nothing is casting yet, so anything in cast/ was left by a process that was killed
+        // mid-cast — possibly a multi-gigabyte live remux — and would otherwise stay forever.
+        val leftovers = File(context.cacheDir, "cast")
+        Thread({ leftovers.listFiles()?.forEach { runCatching { it.delete() } } }, "cast-cache-purge").start()
     }
 
-    actual suspend fun cast(request: CastStreamRequest): Result<Unit> = try {
-        deliver(request)
-    } catch (cancelled: CancellationException) {
-        // Leaving the player mid-cast would otherwise strand the status at Probing/Preparing,
-        // which the player's status banner then shows the next time it opens.
-        _status.value = CastDeliveryStatus.Idle
-        throw cancelled
+    actual suspend fun cast(request: CastStreamRequest): Result<Unit> {
+        // A superseded cast can still be unwinding from a blocking call (a SOAP request, the
+        // probe), so it is cancelled and waited out rather than left to release or overwrite the
+        // resources this one is about to create.
+        activeDelivery?.cancel()
+        return deliveryLock.withLock {
+            val self = currentCoroutineContext()[Job]
+            activeDelivery = self
+            try {
+                deliver(request)
+            } catch (cancelled: CancellationException) {
+                // Leaving the player, or Stop casting, mid-cast: nothing this cast created is
+                // wanted, and the status would otherwise strand at Probing/Preparing, which the
+                // player's banner then shows the next time it opens.
+                releasePrevious()
+                _status.value = CastDeliveryStatus.Idle
+                throw cancelled
+            } finally {
+                if (activeDelivery === self) activeDelivery = null
+            }
+        }
     }
 
     private suspend fun deliver(request: CastStreamRequest): Result<Unit> {
@@ -64,6 +96,10 @@ actual object CastDelivery {
         releasePrevious()
 
         val capabilities = receiver.capabilities
+        val settings = NuvioEnhancedSettingsRepository.run {
+            ensureLoaded()
+            uiState.value
+        }
 
         // --- Probe ---------------------------------------------------------------------
         _status.value = CastDeliveryStatus.Probing
@@ -75,9 +111,10 @@ actual object CastDelivery {
                 null
             }
         }
-        val probe = if (receiver.directPlayOnly) {
-            // A direct-play receiver only uses the probe for the container and duration, so a
-            // slow origin must not hold the cast up. The extractor's blocking read cannot be
+        val probe = if (receiver.prefersDirectPlay && !settings.castAlwaysConvert) {
+            // Direct play only uses the probe for the container and duration, so a slow origin
+            // must not hold the cast up. Under "Always convert" the probe decides whether to
+            // convert, so it gets the full time instead. The extractor's blocking read cannot be
             // interrupted, so it runs in a detached scope and is abandoned on timeout rather
             // than waited for.
             val pending = CoroutineScope(Dispatchers.IO).async { probeOrNull() }
@@ -99,19 +136,17 @@ actual object CastDelivery {
                 ?: containerFromUrl(request.url),
             requiresLocalServer = !request.sourceReachableByReceiver,
         )
-        val settings = NuvioEnhancedSettingsRepository.run {
-            ensureLoaded()
-            uiState.value
-        }
-        val hlsAsTs = receiver.directPlayOnly &&
-            directPlan.targetContainer == CastContainer.HLS &&
-            shouldConvertHls(settings)
+        val dlnaHls = receiver.prefersDirectPlay && directPlan.targetContainer == CastContainer.HLS
+        val hlsAsTs = dlnaHls && shouldConvertHls(settings)
         val plan = when {
-            hlsAsTs || probe == null -> directPlan
-            receiver.directPlayOnly && !settings.castAlwaysConvert -> directPlan
+            // For a DLNA renderer an M3U8 stream is either converted live ("Convert M3U8") or
+            // sent as is. The whole-file path below would have to download the entire stream
+            // before playing, and would ask a second time after "Play as is".
+            hlsAsTs || dlnaHls || probe == null -> directPlan
+            receiver.prefersDirectPlay && !settings.castAlwaysConvert -> directPlan
             else -> CastDeliveryPlanner.plan(probe, capabilities, request.sourceReachableByReceiver).let { planned ->
                 val converts = planned.mode == CastDeliveryMode.REMUX || planned.mode == CastDeliveryMode.TRANSCODE
-                if (receiver.directPlayOnly && converts && !confirmConversion(settings, planned)) {
+                if (receiver.prefersDirectPlay && converts && !confirmConversion(settings, planned)) {
                     directPlan
                 } else {
                     planned
@@ -196,6 +231,7 @@ actual object CastDelivery {
         return result.fold(
             onSuccess = {
                 _status.value = CastDeliveryStatus.Playing(if (hlsAsTs) CastDeliveryMode.REMUX else plan.mode)
+                liveJob?.let(::watchLiveJob)
                 Result.success(Unit)
             },
             onFailure = { error -> fail(error.message ?: "The TV refused the stream") },
@@ -203,9 +239,29 @@ actual object CastDelivery {
     }
 
     actual fun cancel() {
+        // Cancelling the delivery coroutine itself, not only its resources: a cast still
+        // probing, asking or loading would otherwise carry on afterwards and publish again.
+        activeDelivery?.cancel()
         processor?.cancel()
         releasePrevious()
         _status.value = CastDeliveryStatus.Idle
+    }
+
+    /**
+     * Reports a live remux that dies after the renderer has started playing it. Without this
+     * the stream just ends early on the TV while the app still says it is playing.
+     */
+    private fun watchLiveJob(job: LiveRemuxJob) {
+        watchScope.launch {
+            while (!job.isFinished) delay(LIVE_JOB_WATCH_MS)
+            val failure = job.failure ?: return@launch
+            deliveryLock.withLock {
+                // Only if this job still belongs to the current cast.
+                if (liveJob !== job) return@withLock
+                Log.w(TAG, "M3U8 conversion stopped during playback: $failure")
+                fail("The M3U8 conversion stopped during playback")
+            }
+        }
     }
 
     /**
@@ -259,7 +315,17 @@ actual object CastDelivery {
 
         val started = try {
             withTimeoutOrNull(HLS_START_TIMEOUT_MS) {
-                while (output.length() < HLS_HEAD_START_BYTES && !job.isFinished) delay(HLS_START_POLL_MS)
+                // A full head start when the stream delivers it quickly (any VOD); otherwise a
+                // small one plus a few seconds, which a low-bitrate live stream produces only in
+                // real time and might never reach 512 KB of within the timeout.
+                val begin = System.currentTimeMillis()
+                while (!job.isFinished) {
+                    val written = output.length()
+                    if (written >= HLS_HEAD_START_BYTES) break
+                    val waited = System.currentTimeMillis() - begin
+                    if (written >= HLS_MIN_START_BYTES && waited >= HLS_MIN_START_WAIT_MS) break
+                    delay(HLS_START_POLL_MS)
+                }
                 true
             }
         } catch (cancelled: CancellationException) {

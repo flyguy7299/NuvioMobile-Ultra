@@ -21,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
@@ -237,18 +238,22 @@ fun CastConversionPromptDialog() {
 fun CastStatusBanner() {
     val status by CastDelivery.status.collectAsState()
     val message = castStatusMessage()
-    var dismissedFailure by remember { mutableStateOf<CastDeliveryStatus.Failed?>(null) }
+    // Seeded from, and written back to, a value that outlives this screen, so a failure that has
+    // already been shown does not flash up again every time the player is reopened.
+    var dismissedOccurrence by remember { mutableStateOf(lastDismissedFailureOccurrence) }
     val failure = status as? CastDeliveryStatus.Failed
 
-    LaunchedEffect(failure) {
-        if (failure != null) {
+    LaunchedEffect(failure?.occurrence) {
+        if (failure != null && failure.occurrence != dismissedOccurrence) {
             delay(FAILURE_BANNER_MS)
-            dismissedFailure = failure
+            lastDismissedFailureOccurrence = failure.occurrence
+            dismissedOccurrence = failure.occurrence
         }
     }
 
-    if (message == null || (failure != null && failure === dismissedFailure)) return
-    Popup(alignment = Alignment.TopCenter, offset = IntOffset(0, 48)) {
+    if (message == null || (failure != null && failure.occurrence == dismissedOccurrence)) return
+    val topOffsetPx = with(LocalDensity.current) { BANNER_TOP_OFFSET.roundToPx() }
+    Popup(alignment = Alignment.TopCenter, offset = IntOffset(0, topOffsetPx)) {
         Surface(
             shape = RoundedCornerShape(50),
             color = if (failure != null) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant,
@@ -264,6 +269,8 @@ fun CastStatusBanner() {
 }
 
 private const val FAILURE_BANNER_MS = 8_000L
+private val BANNER_TOP_OFFSET = 48.dp
+private var lastDismissedFailureOccurrence = -1L
 
 /** One-line human summary of the delivery status, for a toast or overlay. */
 @Composable

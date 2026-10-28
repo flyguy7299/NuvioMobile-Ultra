@@ -18,8 +18,16 @@ sealed interface CastDeliveryStatus {
     /** Handed off to the receiver. */
     data class Playing(val mode: CastDeliveryMode) : CastDeliveryStatus
 
-    data class Failed(val message: String) : CastDeliveryStatus
+    /**
+     * [occurrence] makes every failure distinct, so the same message twice in a row is still a
+     * new status: a StateFlow would otherwise drop the repeat and the UI never show it.
+     */
+    data class Failed(val message: String, val occurrence: Long = nextFailureOccurrence()) : CastDeliveryStatus
 }
+
+private var failureOccurrences = 0L
+
+private fun nextFailureOccurrence(): Long = ++failureOccurrences
 
 data class CastStreamRequest(
     val url: String,

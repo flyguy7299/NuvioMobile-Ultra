@@ -184,6 +184,16 @@ class CastLocalServer {
         }
     }
 
+    /** Waits, up to the socket timeout, for [file] to grow past [offset]. False if it never does. */
+    private fun awaitLength(file: File, job: LiveRemuxJob, offset: Long): Boolean {
+        val deadline = System.currentTimeMillis() + SOCKET_TIMEOUT_MS
+        while (file.length() <= offset) {
+            if (job.isFinished || System.currentTimeMillis() > deadline) return file.length() > offset
+            Thread.sleep(GROWING_FILE_POLL_MS)
+        }
+        return true
+    }
+
     private fun serveGrowingFile(
         payload: Payload.GrowingFile,
         rangeHeader: String?,
@@ -194,13 +204,36 @@ class CastLocalServer {
         if (job.isFinished && job.failure == null) {
             return serveFile(Payload.LocalFile(payload.file, payload.contentType), rangeHeader, headOnly, output)
         }
+
+        // A renderer that drops the connection reconnects with "bytes=N-" to carry on where it
+        // was. Answering 200 from byte 0 restarted playback, so an offset already written (or
+        // written shortly) is honoured. The total is unknown while the file grows, hence "*"
+        // and an open-ended span.
+        val start = rangeHeader
+            ?.substringAfter("bytes=", "")
+            ?.substringBefore('-')
+            ?.trim()
+            ?.toLongOrNull()
+            ?: 0L
+        if (start > 0 && !awaitLength(payload.file, job, start)) {
+            writeHeaders(
+                output,
+                status = 416,
+                reason = "Requested Range Not Satisfiable",
+                contentType = payload.contentType,
+                contentLength = 0,
+                contentRange = "bytes */*",
+                seekable = false,
+            )
+            return
+        }
         writeHeaders(
             output,
-            status = 200,
-            reason = "OK",
+            status = if (start > 0) 206 else 200,
+            reason = if (start > 0) "Partial Content" else "OK",
             contentType = payload.contentType,
             contentLength = null,
-            contentRange = null,
+            contentRange = if (start > 0) "bytes $start-${start + LIVE_RANGE_SPAN - 1}/*" else null,
             seekable = false,
         )
         if (headOnly) return
@@ -208,6 +241,7 @@ class CastLocalServer {
         val buffer = ByteArray(BUFFER_BYTES)
         try {
             RandomAccessFile(payload.file, "r").use { raf ->
+                raf.seek(start)
                 while (true) {
                     val got = raf.read(buffer)
                     if (got > 0) {
@@ -402,5 +436,8 @@ class CastLocalServer {
         const val CONNECT_TIMEOUT_MS = 15_000
         const val MAX_HEADER_LENGTH = 8 * 1024
         const val GROWING_FILE_POLL_MS = 200L
+
+        /** Stand-in for the unknown end of a range served from a file still being written. */
+        const val LIVE_RANGE_SPAN = 1L shl 40
     }
 }
