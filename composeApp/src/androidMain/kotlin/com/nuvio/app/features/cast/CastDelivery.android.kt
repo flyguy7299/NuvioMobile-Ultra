@@ -59,26 +59,27 @@ actual object CastDelivery {
 
     /** Android-only entry point; call alongside [CastPlatform.initialize]. */
     fun initialize(context: Context) {
-        appContext = context.applicationContext
         // Nothing is casting yet, so anything in cast/ was left by a process that was killed
         // mid-cast — possibly a multi-gigabyte live remux — and would otherwise stay forever.
-        // Only files older than this moment, so a cast started before the purge thread gets to
-        // the directory keeps its own file.
-        val leftovers = File(context.cacheDir, "cast")
+        // Only files older than this moment are removed, and the moment is taken before casting
+        // becomes possible (appContext is set), so a cast's own file is never older than it.
         val cutoff = System.currentTimeMillis()
+        appContext = context.applicationContext
+        val leftovers = File(context.cacheDir, "cast")
         Thread({
             leftovers.listFiles()?.filter { it.lastModified() < cutoff }?.forEach { runCatching { it.delete() } }
         }, "cast-cache-purge").start()
     }
 
     actual suspend fun cast(request: CastStreamRequest): Result<Unit> {
+        // Only the newest request may run: a cast still queued for the lock when a newer one (or
+        // cancel()) arrives gives up instead of running after it. Claimed first, so a call can't
+        // be overtaken between entering and claiming.
+        val generation = castGeneration.incrementAndGet()
         // A superseded cast can still be unwinding from a blocking call (a SOAP request, the
         // probe), so it is cancelled and waited out rather than left to release or overwrite the
         // resources this one is about to create.
         activeDelivery?.cancel()
-        // Only the newest request may run: a cast still queued for the lock when a newer one (or
-        // cancel()) arrives gives up instead of running after it.
-        val generation = castGeneration.incrementAndGet()
         return deliveryLock.withLock {
             if (generation != castGeneration.get()) throw CancellationException("Superseded by a newer cast")
             val self = currentCoroutineContext()[Job]
