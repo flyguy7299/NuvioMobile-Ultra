@@ -20,6 +20,11 @@ on:
       - 'iosApp/**'
   pull_request:
   workflow_dispatch:
+    inputs:
+      application_id:
+        description: 'Package name for the debug APK (empty keeps com.nuvio.enhanced). A different one installs alongside an existing copy.'
+        required: false
+        default: ''
 
 concurrency:
   group: build-android-${{ github.ref }}
@@ -83,8 +88,10 @@ jobs:
           # :composeApp is a library under the new KMP Android plugin and has no application
           # variants; the APK comes from :androidApp, which carries the full/playstore flavour
           # dimension. This mirrors android-release.yml, which builds assembleFullRelease.
+          app_id_arg=()
+          if [ -n "$APP_ID" ]; then app_id_arg=("-PnuvioDebugApplicationId=$APP_ID"); fi
           if ! ./gradlew :androidApp:assembleFullDebug \
-              -Pnuvio.android.ffmpeg=${{ matrix.ffmpeg }} 2>&1 | tee gradle-output.log; then
+              -Pnuvio.android.ffmpeg=${{ matrix.ffmpeg }} "${app_id_arg[@]}" 2>&1 | tee gradle-output.log; then
             echo "::group::Failure detail"
             sed -n '/FAILURE: Build failed/,/^\* Get more help/p' gradle-output.log | head -60
             echo "--- compiler errors, if any ---"
@@ -94,6 +101,7 @@ jobs:
           fi
         env:
           GRADLE_OPTS: -Xmx5g -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=1g
+          APP_ID: ${{ inputs.application_id }}
 
       # Confirms the vendored AAR was actually linked rather than silently ignored, which is
       # the failure mode that would otherwise look identical to a working build.

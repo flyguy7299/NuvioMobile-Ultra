@@ -394,6 +394,9 @@ actual object DlnaPlatform {
         val device = (_connection.value as? DlnaConnectionState.Connected)?.device
             ?: return@withContext Result.failure(IllegalStateException("No DLNA device connected"))
         runCatching {
+            // Renderers such as Kodi open and probe the stream before answering these two calls,
+            // and for a large remote file that alone can outlast the normal 5 s timeout, which
+            // reported a failure while the renderer was still getting ready.
             soapPost(
                 device.avTransportControlUrl,
                 DlnaActions.setAvTransportUri(
@@ -405,8 +408,9 @@ actual object DlnaPlatform {
                     // can be offered.
                     subtitleUrl = request.subtitles.firstOrNull()?.url,
                 ),
+                timeoutMs = LOAD_TIMEOUT_MS,
             )
-            soapPost(device.avTransportControlUrl, DlnaActions.play())
+            soapPost(device.avTransportControlUrl, DlnaActions.play(), timeoutMs = LOAD_TIMEOUT_MS)
             // Seek only lands once the renderer is out of STOPPED, so it follows Play rather
             // than preceding it. Without this, resuming a part-watched title always restarted
             // it from the beginning on DLNA while working correctly on Chromecast.
@@ -515,4 +519,5 @@ actual object DlnaPlatform {
 
     private const val POLL_INTERVAL_MS = 2_000L
     private const val HTTP_TIMEOUT_MS = 5_000
+    private const val LOAD_TIMEOUT_MS = 30_000
 }

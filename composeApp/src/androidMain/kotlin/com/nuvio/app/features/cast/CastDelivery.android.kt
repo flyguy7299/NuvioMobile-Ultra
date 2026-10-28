@@ -2,6 +2,7 @@ package com.nuvio.app.features.cast
 
 import android.content.Context
 import android.util.Log
+import com.nuvio.app.features.cast.model.CastContainer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,16 +45,19 @@ actual object CastDelivery {
             null
         }
 
-        val plan = probe?.let {
-            CastDeliveryPlanner.plan(it, capabilities, request.sourceReachableByReceiver)
-        } ?: CastDeliveryPlan(
+        val directPlan = CastDeliveryPlan(
             mode = CastDeliveryMode.DIRECT,
             reasons = emptyList(),
             videoTarget = null,
             audioTarget = null,
-            targetContainer = containerFromUrl(request.url),
+            targetContainer = probe?.container?.takeUnless { it == CastContainer.UNKNOWN }
+                ?: containerFromUrl(request.url),
             requiresLocalServer = !request.sourceReachableByReceiver,
         )
+        val plan = when {
+            probe == null || receiver.directPlayOnly -> directPlan
+            else -> CastDeliveryPlanner.plan(probe, capabilities, request.sourceReachableByReceiver)
+        }
 
         if (plan.mode == CastDeliveryMode.UNSUPPORTED) {
             return fail("${receiver.name} cannot play video")

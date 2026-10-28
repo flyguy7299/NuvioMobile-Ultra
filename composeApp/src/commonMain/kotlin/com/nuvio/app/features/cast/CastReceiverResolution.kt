@@ -19,6 +19,17 @@ internal data class ActiveCastReceiver(
     val name: String,
     val capabilities: CastReceiverCapabilities,
     val deliver: suspend (CastMediaRequest) -> Result<Unit>,
+    /**
+     * Always hand this receiver the original stream instead of remuxing or transcoding it.
+     *
+     * Set for DLNA. A renderer's protocol info says almost nothing about codecs, so its
+     * capabilities sit at the first-generation Chromecast floor, and nearly every large file
+     * (Matroska, HEVC, 4K, AC-3/DTS) failed that check. The remux/transcode path then has to
+     * write the whole output file to the phone before the renderer is told to play, which for a
+     * multi-gigabyte film never finishes, so nothing played. DLNA renderers (Kodi, smart TVs)
+     * decode far more than that floor, and one that can't play a file says so with a SOAP fault.
+     */
+    val directPlayOnly: Boolean = false,
 )
 
 internal enum class CastTransport { CHROMECAST, DLNA }
@@ -50,6 +61,7 @@ internal fun resolveActiveReceiver(): ActiveCastReceiver? {
             name = connected.device.name,
             capabilities = connected.device.capabilities,
             deliver = DlnaPlatform::load,
+            directPlayOnly = true,
         )
     }
 
