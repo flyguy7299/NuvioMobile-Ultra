@@ -44,6 +44,7 @@ internal data class NuvioEnhancedSettingsUiState(
     val discordWelcomeSeen: Boolean = false,
     val seenFeatureIds: Set<String> = emptySet(),
     val castAlwaysConvert: Boolean = false,
+    val castAlwaysConvertAsk: Boolean = true,
     val castConvertHls: Boolean = false,
     val castConvertHlsAsk: Boolean = true,
 ) {
@@ -132,6 +133,7 @@ private data class StoredNuvioEnhancedSettings(
     val discordWelcomeSeen: Boolean = false,
     val seenFeatureIds: Set<String> = emptySet(),
     val castAlwaysConvert: Boolean = false,
+    val castAlwaysConvertAsk: Boolean = true,
     val castConvertHls: Boolean = false,
     val castConvertHlsAsk: Boolean = true,
 )
@@ -327,6 +329,10 @@ internal object NuvioEnhancedSettingsRepository {
         copy(castAlwaysConvert = enabled)
     }
 
+    fun setCastAlwaysConvertAsk(enabled: Boolean) = update {
+        copy(castAlwaysConvertAsk = enabled)
+    }
+
     fun setCastConvertHls(enabled: Boolean) = update {
         copy(castConvertHls = enabled)
     }
@@ -398,6 +404,7 @@ internal object NuvioEnhancedSettingsRepository {
             discordWelcomeSeen = stored.discordWelcomeSeen,
             seenFeatureIds = stored.seenFeatureIds,
             castAlwaysConvert = stored.castAlwaysConvert,
+            castAlwaysConvertAsk = stored.castAlwaysConvertAsk,
             castConvertHls = stored.castConvertHls,
             castConvertHlsAsk = stored.castConvertHlsAsk,
         )

@@ -281,14 +281,14 @@ fun castStatusMessage(): String? {
                 },
             )
             if (value.progress in 0..100) append(" — ${value.progress}%")
-            value.reasons.firstOrNull()?.let { append(" (${describe(it)})") }
+            value.reasons.firstOrNull()?.let { append(" (${describeCastIncompatibility(it)})") }
         }
         is CastDeliveryStatus.Playing -> null
         is CastDeliveryStatus.Failed -> value.message
     }
 }
 
-private fun describe(reason: CastIncompatibility): String = when (reason) {
+internal fun describeCastIncompatibility(reason: CastIncompatibility): String = when (reason) {
     is CastIncompatibility.VideoCodecUnsupported -> "${reason.codec} not supported"
     is CastIncompatibility.AudioCodecUnsupported -> "${reason.codec} audio not supported"
     is CastIncompatibility.ContainerUnsupported -> "${reason.container} container not supported"

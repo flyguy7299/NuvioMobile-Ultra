@@ -480,6 +480,15 @@ private fun NuvioEnhancedSettingsPageContent(
                     )
                     SettingsGroupDivider(isTablet = isTablet)
                     SettingsSwitchRow(
+                        title = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_ask_title),
+                        description = stringResource(Res.string.nuvio_enhanced_cast_always_convert_ask_desc),
+                        checked = settings.castAlwaysConvertAsk,
+                        enabled = settings.castAlwaysConvert,
+                        isTablet = isTablet,
+                        onCheckedChange = NuvioEnhancedSettingsRepository::setCastAlwaysConvertAsk,
+                    )
+                    SettingsGroupDivider(isTablet = isTablet)
+                    SettingsSwitchRow(
                         title = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_title),
                         description = stringResource(Res.string.nuvio_enhanced_cast_convert_hls_desc),
                         checked = settings.castConvertHls,

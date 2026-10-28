@@ -2569,6 +2569,7 @@
     <string name="nuvio_enhanced_section_casting">Casting</string>
     <string name="nuvio_enhanced_cast_always_convert_title">Always convert for DLNA</string>
     <string name="nuvio_enhanced_cast_always_convert_desc">Your TV may not support certain formats. Converting before casting can help, but a large file has to be converted in full before it plays.</string>
+    <string name="nuvio_enhanced_cast_always_convert_ask_desc">Ask before converting a file, showing why it needs it, instead of always converting.</string>
     <string name="nuvio_enhanced_cast_convert_hls_title">Convert M3U8</string>
     <string name="nuvio_enhanced_cast_convert_hls_desc">Your TV may not support M3U8 video. Converting it to a TS stream on the phone lets TVs such as Hisense play it.</string>
     <string name="nuvio_enhanced_cast_convert_hls_ask_title">Ask every time</string>

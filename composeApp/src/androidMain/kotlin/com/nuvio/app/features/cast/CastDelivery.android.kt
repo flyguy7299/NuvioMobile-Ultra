@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.nuvio.app.features.cast.model.CastContainer
 import com.nuvio.app.features.cast.model.CastMediaProbe
+import com.nuvio.app.features.cast.ui.describeCastIncompatibility
 import com.nuvio.app.features.settings.NuvioEnhancedSettingsRepository
 import com.nuvio.app.features.settings.NuvioEnhancedSettingsUiState
 import kotlinx.coroutines.CancellationException
@@ -108,7 +109,14 @@ actual object CastDelivery {
         val plan = when {
             hlsAsTs || probe == null -> directPlan
             receiver.directPlayOnly && !settings.castAlwaysConvert -> directPlan
-            else -> CastDeliveryPlanner.plan(probe, capabilities, request.sourceReachableByReceiver)
+            else -> CastDeliveryPlanner.plan(probe, capabilities, request.sourceReachableByReceiver).let { planned ->
+                val converts = planned.mode == CastDeliveryMode.REMUX || planned.mode == CastDeliveryMode.TRANSCODE
+                if (receiver.directPlayOnly && converts && !confirmConversion(settings, planned)) {
+                    directPlan
+                } else {
+                    planned
+                }
+            }
         }
 
         if (plan.mode == CastDeliveryMode.UNSUPPORTED) {
@@ -210,6 +218,26 @@ actual object CastDelivery {
         return CastConversionPrompt.ask(
             title = "Convert M3U8?",
             message = "This is an M3U8 stream, which many TVs cannot play. Convert it to a TS stream on your phone?",
+            confirmLabel = "Convert",
+            declineLabel = "Play as is",
+        )
+    }
+
+    /**
+     * Whether to go ahead with converting a file for a DLNA renderer under "Always convert":
+     * always, or after asking with the reasons the planner found.
+     */
+    private suspend fun confirmConversion(settings: NuvioEnhancedSettingsUiState, plan: CastDeliveryPlan): Boolean {
+        if (!settings.castAlwaysConvertAsk) return true
+        val reasons = plan.reasons.joinToString(", ") { describeCastIncompatibility(it) }
+        val action = if (plan.mode == CastDeliveryMode.TRANSCODE) "converted" else "repackaged"
+        return CastConversionPrompt.ask(
+            title = "Convert this file?",
+            message = buildString {
+                append("Your TV may not play this file as it is")
+                if (reasons.isNotEmpty()) append(" ($reasons)")
+                append(". It can be $action on your phone first, but the whole file has to be done before it plays.")
+            },
             confirmLabel = "Convert",
             declineLabel = "Play as is",
         )
