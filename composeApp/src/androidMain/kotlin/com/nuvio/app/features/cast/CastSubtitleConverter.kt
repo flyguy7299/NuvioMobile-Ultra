@@ -105,13 +105,14 @@ internal object CastSubtitleConverter {
     /** Cuts the timeline at every boundary so overlapping cues become one cue per slice. */
     private fun flatten(cues: List<Cue>): List<Cue> {
         if (cues.isEmpty()) return cues
-        val sorted = cues.sortedWith(compareBy({ it.startMs }, { it.endMs }))
-        val boundaries = sorted.flatMap { listOf(it.startMs, it.endMs) }.distinct().sorted()
+        val boundaries = cues.flatMap { listOf(it.startMs, it.endMs) }.distinct().sorted()
         val result = mutableListOf<Cue>()
         for (i in 0 until boundaries.size - 1) {
             val from = boundaries[i]
             val to = boundaries[i + 1]
-            val text = sorted.filter { it.startMs <= from && it.endMs >= to }
+            // Source order, not time order, so a dual-language file keeps each language on the
+            // same line even when one of its cues ends sooner than the other.
+            val text = cues.filter { it.startMs <= from && it.endMs >= to }
                 .map { it.text }
                 .distinct()
                 .joinToString("\n")

@@ -185,16 +185,34 @@ actual object CastDelivery {
             request.subtitles.isNotEmpty()
         // A stream that starts at the resume point (a live remux) needs its subtitle times shifted
         // the same way; the renderer seeks everything else itself.
-        val subtitleFile = if (receiver.prefersDirectPlay) {
+        var subtitleFile = if (receiver.prefersDirectPlay) {
             prepareSubtitle(context, request, originMs = if (hlsAsTs || muxSubtitles) request.startPositionMs else 0L)
         } else {
             null
         }
 
+        // Muxing is optional, so a failure falls back to the video as is with the subtitle beside
+        // it, rather than failing a cast that would otherwise play.
+        val muxedUrl = subtitleFile?.takeIf { muxSubtitles }?.let { muxSource ->
+            val language = request.subtitles.first().language
+            startLiveStream(context, ".mkv", MKV_CONTENT_TYPE, "video with subtitles") { output ->
+                startSubtitleMuxToMkv(request.url, request.headers, request.startPositionMs, muxSource, language, output)
+            }.getOrElse { error ->
+                Log.w(TAG, "Could not put the subtitles inside the video, sending them separately: ${error.message}")
+                liveJob?.cancel()
+                liveJob = null
+                // The muxed copy was shifted to the resume point; a renderer that seeks itself
+                // needs the original times.
+                subtitleFile = prepareSubtitle(context, request, originMs = 0L)
+                null
+            }
+        }
+
         // --- Produce a playable source -------------------------------------------------
         val contentUrl: String
         val contentType: String
-        val liveRemux = hlsAsTs || (muxSubtitles && subtitleFile != null)
+        val subtitlesMuxed = muxedUrl != null
+        val liveRemux = hlsAsTs || subtitlesMuxed
 
         if (hlsAsTs) {
             contentType = TS_CONTENT_TYPE
@@ -204,14 +222,9 @@ actual object CastDelivery {
             }.getOrElse { error ->
                 return fail(error.message ?: "Could not convert this M3U8 stream for casting")
             }
-        } else if (liveRemux && subtitleFile != null) {
+        } else if (muxedUrl != null) {
             contentType = MKV_CONTENT_TYPE
-            val language = request.subtitles.first().language
-            contentUrl = startLiveStream(context, ".mkv", contentType, "video with subtitles") { output ->
-                startSubtitleMuxToMkv(request.url, request.headers, request.startPositionMs, subtitleFile, language, output)
-            }.getOrElse { error ->
-                return fail(error.message ?: "Could not put the subtitles into the video")
-            }
+            contentUrl = muxedUrl
         } else if (plan.mode == CastDeliveryMode.DIRECT) {
             contentType = contentTypeFor(plan.targetContainer)
             contentUrl = if (plan.requiresLocalServer) {
@@ -251,9 +264,9 @@ actual object CastDelivery {
 
         // Beside the video unless it went inside it. Served under a ".srt" path, which is how
         // renderers and the DIDL builder tell the subtitle format.
-        val subtitlesMuxed = liveRemux && !hlsAsTs
-        val castSubtitles = if (subtitleFile != null && !subtitlesMuxed) {
-            publish(CastLocalServer.Payload.LocalFile(subtitleFile, SRT_CONTENT_TYPE), suffix = ".srt")
+        val externalSubtitle = subtitleFile?.takeUnless { subtitlesMuxed }
+        val castSubtitles = if (externalSubtitle != null) {
+            publish(CastLocalServer.Payload.LocalFile(externalSubtitle, SRT_CONTENT_TYPE), suffix = ".srt")
                 ?.let { url -> listOf(request.subtitles.first().copy(url = url)) }
                 .orEmpty()
         } else {
