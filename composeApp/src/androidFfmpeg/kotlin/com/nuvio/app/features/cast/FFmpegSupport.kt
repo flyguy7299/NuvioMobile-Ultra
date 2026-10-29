@@ -216,7 +216,7 @@ private class FFmpegLiveRemuxJob : LiveRemuxJob {
     @Volatile override var failure: String? = null
 
     override fun cancel() {
-        sessionId?.let { FFmpegKit.cancel(it) }
+        sessionId?.let(::cancelSession)
     }
 }
 
@@ -294,14 +294,14 @@ private class FFmpegCastMediaProcessor : CastMediaProcessor {
             }
             sessionId = session.sessionId
             continuation.invokeOnCancellation {
-                sessionId?.let { FFmpegKit.cancel(it) }
+                sessionId?.let(::cancelSession)
                 sessionId = null
             }
         }
     }
 
     override fun cancel() {
-        sessionId?.let { FFmpegKit.cancel(it) }
+        sessionId?.let(::cancelSession)
         sessionId = null
     }
 
@@ -431,3 +431,12 @@ private val KNOWN_ENCODERS = listOf(
     ENCODER_AAC,
     ENCODER_MP3,
 )
+
+/** Cancelling must never crash the app either, whatever state the FFmpeg bundle is in. */
+private fun cancelSession(sessionId: Long) {
+    try {
+        FFmpegKit.cancel(sessionId)
+    } catch (e: LinkageError) {
+        Log.e(TAG, "FFmpeg could not cancel session $sessionId", e)
+    }
+}
