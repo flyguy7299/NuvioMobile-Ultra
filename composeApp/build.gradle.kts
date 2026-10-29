@@ -530,6 +530,12 @@ kotlin {
                 implementation(libs.androidx.media3.effect)
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
                 implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("lib-*.aar"))))
+                if (bundleFfmpeg) {
+                    // A local AAR brings no transitive dependencies. FFmpegKit's only one is this,
+                    // touched in FFmpegKitConfig's static initializer, so without it the first
+                    // FFmpeg call throws NoClassDefFoundError and takes the app down.
+                    implementation("com.arthenica:smart-exception-java:0.2.1")
+                }
                 if (androidDistribution == "full") {
                     implementation(files("libs/quickjs-kt-android-1.0.5-nuvio.aar"))
                     implementation(files("libs/cloudstream-runtime-api-4.8.0-3496e5f.aar"))

@@ -178,26 +178,34 @@ internal fun startSubtitleMuxToMkv(
     return startLiveRemux(args)
 }
 
-private fun startLiveRemux(args: List<String>): LiveRemuxJob {
+/** Null when FFmpeg itself can't start (a broken or incomplete bundle), so callers fall back. */
+private fun startLiveRemux(args: List<String>): LiveRemuxJob? {
     val job = FFmpegLiveRemuxJob()
     // Arguments rather than a command string, so no URL or header needs shell-style quoting.
-    val session = FFmpegKit.executeWithArgumentsAsync(
-        args.toTypedArray(),
-        { completed ->
-            job.failure = if (ReturnCode.isSuccess(completed.returnCode) || ReturnCode.isCancel(completed.returnCode)) {
-                null
-            } else {
-                completed.failStackTrace
-                    ?: completed.allLogsAsString?.takeLast(LOG_TAIL_CHARS)
-                    ?: "ffmpeg exited with ${completed.returnCode}"
-            }
-            job.isFinished = true
-        },
-        // FFmpeg logs every segment URL it opens, signed tokens included, so nothing is
-        // forwarded to logcat; a failure still reports the tail of the log above.
-        { },
-        null,
-    )
+    val session = try {
+        FFmpegKit.executeWithArgumentsAsync(
+            args.toTypedArray(),
+            { completed ->
+                job.failure = if (ReturnCode.isSuccess(completed.returnCode) || ReturnCode.isCancel(completed.returnCode)) {
+                    null
+                } else {
+                    completed.failStackTrace
+                        ?: completed.allLogsAsString?.takeLast(LOG_TAIL_CHARS)
+                        ?: "ffmpeg exited with ${completed.returnCode}"
+                }
+                job.isFinished = true
+            },
+            // FFmpeg logs every segment URL it opens, signed tokens included, so nothing is
+            // forwarded to logcat; a failure still reports the tail of the log above.
+            { },
+            null,
+        )
+    } catch (e: LinkageError) {
+        // A missing class or native library is an Error, not an Exception: uncaught, it kills
+        // the app instead of failing the cast.
+        Log.e(TAG, "FFmpeg could not start", e)
+        return null
+    }
     job.sessionId = session.sessionId
     return job
 }
@@ -244,7 +252,7 @@ private class FFmpegCastMediaProcessor : CastMediaProcessor {
         Log.i(TAG, "ffmpeg $command")
 
         return suspendCancellableCoroutine { continuation ->
-            val session: FFmpegSession = FFmpegKit.executeAsync(
+            val session: FFmpegSession = try { FFmpegKit.executeAsync(
                 command,
                 { completed ->
                     sessionId = null
@@ -279,7 +287,11 @@ private class FFmpegCastMediaProcessor : CastMediaProcessor {
                         ),
                     )
                 },
-            )
+            ) } catch (e: LinkageError) {
+                // As in startLiveRemux: fail the cast, don't crash the app.
+                continuation.resume(Result.failure(IllegalStateException("FFmpeg could not start", e)))
+                return@suspendCancellableCoroutine
+            }
             sessionId = session.sessionId
             continuation.invokeOnCancellation {
                 sessionId?.let { FFmpegKit.cancel(it) }
