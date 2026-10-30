@@ -117,10 +117,12 @@ jobs:
           echo "Inspecting $apk"
           # FFmpegKit's libraries carry renamed files (scripts/rename-ffmpegkit-libs.py) so they
           # sit beside mpv's own FFmpeg instead of replacing it; both sets must be present.
+          # Listed once: grep -q on a live pipe can SIGPIPE unzip and fail under pipefail.
+          listing="$(unzip -l "$apk")"
           for lib in libffmpegkit.so libavcodfk.so libavcodec.so libmpv.so; do
-            if ! unzip -l "$apk" | grep -q "lib/arm64-v8a/$lib\$"; then
+            if ! grep -q "lib/arm64-v8a/$lib\$" <<<"$listing"; then
               echo "::error::$lib is absent from the APK"
-              unzip -l "$apk" | grep '\.so$' | head -40
+              grep '\.so$' <<<"$listing" | head -40 || true
               exit 1
             fi
           done

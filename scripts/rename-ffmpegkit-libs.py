@@ -58,6 +58,15 @@ def main(aar: str) -> None:
             out.compress_type = info.compress_type
             out.external_attr = info.external_attr
             dst.writestr(out, data)
+    # A partial rename (an upstream layout change) would bring the clash back silently.
+    with zipfile.ZipFile(tmp) as out:
+        names = out.namelist()
+    for abi in sorted({n.split("/")[1] for n in names if n.startswith("jni/") and n.count("/") == 2}):
+        missing = [new for new in RENAMES.values() if f"jni/{abi}/{new}" not in names]
+        leftover = [old for old in RENAMES if f"jni/{abi}/{old}" in names]
+        if missing or leftover:
+            os.remove(tmp)
+            sys.exit(f"{aar}: {abi} is not fully renamed (missing {missing}, leftover {leftover})")
     shutil.move(tmp, aar)
     print(f"{aar}: {changed} native libraries renamed or patched")
 
