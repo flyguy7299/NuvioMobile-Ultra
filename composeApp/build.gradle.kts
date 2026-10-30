@@ -529,7 +529,16 @@ kotlin {
                 implementation(libs.androidx.media3.transformer)
                 implementation(libs.androidx.media3.effect)
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
-                implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("lib-*.aar"))))
+                // FFmpegKit only when it is wanted: its natives are dead weight otherwise.
+                implementation(
+                    fileTree(
+                        mapOf(
+                            "dir" to "libs",
+                            "include" to listOf("lib-*.aar"),
+                            "exclude" to if (bundleFfmpeg) emptyList() else listOf("lib-ffmpeg-kit*.aar"),
+                        ),
+                    ),
+                )
                 if (bundleFfmpeg) {
                     // A local AAR brings no transitive dependencies. FFmpegKit's only one is this,
                     // touched in FFmpegKitConfig's static initializer, so without it the first

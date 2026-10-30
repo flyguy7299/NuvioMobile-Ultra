@@ -115,13 +115,16 @@ jobs:
             exit 1
           fi
           echo "Inspecting $apk"
-          count="$(unzip -l "$apk" | grep -c 'lib/arm64-v8a/libavcodec\.so' || true)"
-          if [ "$count" -lt 1 ]; then
-            echo "::error::libavcodec.so is absent from the APK; the AAR was not linked"
-            unzip -l "$apk" | grep '\.so$' | head -20
-            exit 1
-          fi
-          echo "libavcodec.so present"
+          # FFmpegKit's libraries carry renamed files (scripts/rename-ffmpegkit-libs.py) so they
+          # sit beside mpv's own FFmpeg instead of replacing it; both sets must be present.
+          for lib in libffmpegkit.so libavcodfk.so libavcodec.so libmpv.so; do
+            if ! unzip -l "$apk" | grep -q "lib/arm64-v8a/$lib\$"; then
+              echo "::error::$lib is absent from the APK"
+              unzip -l "$apk" | grep '\.so$' | head -40
+              exit 1
+            fi
+          done
+          echo "FFmpegKit and mpv native libraries both present"
 
       - name: Upload APK
         if: matrix.ffmpeg == 'true'

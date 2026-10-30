@@ -111,6 +111,12 @@ jobs:
             || { echo "::error::NDK missing at $ANDROID_NDK_ROOT"; exit 1; }
           grep Revision "$ANDROID_NDK_ROOT/source.properties"
 
+      - name: Checkout this repository's scripts
+        uses: actions/checkout@v4
+        with:
+          path: nuvio
+          sparse-checkout: scripts
+
       - name: Checkout ffmpeg-kit
         uses: actions/checkout@v4
         with:
@@ -192,6 +198,8 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp "${{ steps.locate.outputs.path }}" "dist/lib-ffmpeg-kit-${FFMPEG_KIT_REF}.aar"
+          # mpv ships its own, newer FFmpeg under the same file names; rename ours so both fit.
+          python3 nuvio/scripts/rename-ffmpegkit-libs.py "dist/lib-ffmpeg-kit-${FFMPEG_KIT_REF}.aar"
           ls -lh dist
 
       - name: Upload
