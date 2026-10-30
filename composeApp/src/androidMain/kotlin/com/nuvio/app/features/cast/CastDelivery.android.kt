@@ -136,12 +136,12 @@ actual object CastDelivery {
         // "Burn subtitles into the video" re-encodes with the subtitle drawn on, for renderers that
         // show none at all. Only meaningful for DLNA, and only with a subtitle selected.
         val burnRequested = receiver.prefersDirectPlay && settings.castBurnSubtitles && request.subtitles.isNotEmpty()
-        val probe = if (receiver.prefersDirectPlay && !settings.castAlwaysConvert && !burnRequested) {
+        val probe = if (receiver.prefersDirectPlay && !settings.castAlwaysConvert) {
             // Direct play only uses the probe for the container and duration, so a slow origin
             // must not hold the cast up. Under "Always convert" the probe decides whether to
-            // convert, and a burn-in uses it for the resolution, so they get the full time. The
-            // extractor's blocking read cannot be interrupted, so it runs in a detached scope and
-            // is abandoned on timeout rather than waited for.
+            // convert, so it gets the full time instead. The extractor's blocking read cannot be
+            // interrupted, so it runs in a detached scope and is abandoned on timeout rather
+            // than waited for.
             val pending = CoroutineScope(Dispatchers.IO).async { probeOrNull() }
             withTimeoutOrNull(DIRECT_PLAY_PROBE_TIMEOUT_MS) { pending.await() } ?: run {
                 if (pending.isActive) Log.w(TAG, "Probe did not finish in time, attempting direct play")
@@ -234,9 +234,8 @@ actual object CastDelivery {
 
         // Optional in the same way: a failure falls back to the video with the subtitle beside it.
         val burnedUrl = subtitleFile?.takeIf { burnSubtitles }?.let { burnSource ->
-            val shortSide = probe?.video?.let { minOf(it.width, it.height) }?.takeIf { it > 0 }
             startLiveStream(context, ".mp4", MP4_CONTENT_TYPE, "video with burned-in subtitles") { output ->
-                startSubtitleBurn(context, request.url, request.headers, request.startPositionMs, shortSide, burnSource, output)
+                startSubtitleBurn(context, request.url, request.headers, request.startPositionMs, burnSource, output)
             }.getOrElse { error ->
                 Log.w(TAG, "Could not burn the subtitles in, sending them separately: ${error.message}")
                 // BurnJob failures are error codes only, never URLs, so they can be shown.

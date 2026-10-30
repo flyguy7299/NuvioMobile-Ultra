@@ -14,9 +14,6 @@ import android.text.TextPaint
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
-import androidx.media3.common.MimeTypes
-import androidx.media3.common.audio.ChannelMixingAudioProcessor
-import androidx.media3.common.audio.ChannelMixingMatrix
 import androidx.media3.common.util.Clock
 import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
@@ -25,14 +22,11 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.common.OverlaySettings
-import androidx.media3.effect.Presentation
 import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.transformer.AudioEncoderSettings
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultAssetLoaderFactory
 import androidx.media3.transformer.DefaultDecoderFactory
-import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
@@ -40,13 +34,9 @@ import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.InAppFragmentedMp4Muxer
 import androidx.media3.transformer.Transformer
-import androidx.media3.transformer.VideoEncoderSettings
 import java.io.File
 
 private const val TAG = "SubtitleBurner"
-private const val MAX_SHORT_SIDE = 1080
-private const val VIDEO_BITRATE = 8_000_000
-private const val AUDIO_BITRATE = 192_000
 /** How much video each written piece holds: the renderer waits about this long to start. */
 private const val FRAGMENT_DURATION_MS = 2_000L
 
@@ -57,7 +47,9 @@ private const val FRAGMENT_DURATION_MS = 2_000L
  *
  * For renderers that show no subtitles at all, external or embedded. FFmpeg can't do this here
  * (no libass, no video encoder in the bundled build), so it is Media3 Transformer on the phone's
- * hardware encoder: H.264 + stereo AAC, the most widely playable output. Fragmented MP4, because a
+ * hardware encoder. Only the subtitle is added: everything else is left to Transformer's defaults,
+ * which keep the source's video codec and HDR where the phone can encode them, and copy the audio
+ * unless the MP4 can't hold it (then it becomes AAC, channels kept). Fragmented MP4, because a
  * normal MP4 writes its index at the end, after the renderer has started reading.
  *
  * The output starts at [startPositionMs] and the subtitle must already be shifted to it: Transformer
@@ -69,7 +61,6 @@ internal fun startSubtitleBurn(
     url: String,
     headers: Map<String, String>,
     startPositionMs: Long,
-    sourceShortSide: Int?,
     subtitleSrt: File,
     output: File,
 ): LiveRemuxJob? {
@@ -104,16 +95,7 @@ internal fun startSubtitleBurn(
             val builder = Transformer.Builder(context)
                 .setLooper(thread.looper)
                 .addListener(listener)
-                .setVideoMimeType(MimeTypes.VIDEO_H264)
-                .setAudioMimeType(MimeTypes.AUDIO_AAC)
                 .setMuxerFactory(InAppFragmentedMp4Muxer.Factory(FRAGMENT_DURATION_MS))
-                .setEncoderFactory(
-                    DefaultEncoderFactory.Builder(context)
-                        .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(VIDEO_BITRATE).build())
-                        .setRequestedAudioEncoderSettings(AudioEncoderSettings.Builder().setBitrate(AUDIO_BITRATE).build())
-                        .setEnableFallback(true)
-                        .build(),
-                )
             // Same reason as Media3CastMediaProcessor: the stock loader has nowhere to put headers.
             if (headers.isNotEmpty()) {
                 val httpDataSourceFactory = DefaultHttpDataSource.Factory()
@@ -130,21 +112,7 @@ internal fun startSubtitleBurn(
                 )
             }
 
-            val videoEffects = buildList {
-                // A 4K encode on a phone falls behind playback; 1080p keeps up.
-                if (sourceShortSide != null && sourceShortSide > MAX_SHORT_SIDE) {
-                    add(Presentation.createForShortSide(MAX_SHORT_SIDE))
-                }
-                add(OverlayEffect(listOf(SubtitleOverlay(cues))))
-            }
-            val audioEffects = listOf(
-                ChannelMixingAudioProcessor().apply {
-                    // Every layout but stereo itself; one left out would fail the export.
-                    (1..8).filter { it != 2 }.forEach { inputChannels ->
-                        putChannelMixingMatrix(ChannelMixingMatrix.createForConstantGain(inputChannels, 2))
-                    }
-                },
-            )
+            val videoEffects = listOf(OverlayEffect(listOf(SubtitleOverlay(cues))))
 
             val mediaItem = MediaItem.Builder()
                 .setUri(url)
@@ -153,11 +121,9 @@ internal fun startSubtitleBurn(
                 )
                 .build()
             val item = EditedMediaItem.Builder(mediaItem)
-                .setEffects(Effects(audioEffects, videoEffects))
+                .setEffects(Effects(emptyList(), videoEffects))
                 .build()
-            val composition = Composition.Builder(EditedMediaItemSequence.Builder(item).build())
-                .setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL)
-                .build()
+            val composition = Composition.Builder(EditedMediaItemSequence.Builder(item).build()).build()
 
             val transformer = builder.build()
             job.transformer = transformer
