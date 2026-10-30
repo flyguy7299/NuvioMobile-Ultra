@@ -247,8 +247,10 @@ fun CastStatusBanner() {
 
     LaunchedEffect(transientOccurrence) {
         if (transientOccurrence != null && transientOccurrence != dismissedOccurrence) {
-            delay(FAILURE_BANNER_MS)
+            // Recorded as seen straight away, so leaving the player before the timer runs out
+            // doesn't bring it back on reopening.
             lastDismissedFailureOccurrence = transientOccurrence
+            delay(FAILURE_BANNER_MS)
             dismissedOccurrence = transientOccurrence
         }
     }

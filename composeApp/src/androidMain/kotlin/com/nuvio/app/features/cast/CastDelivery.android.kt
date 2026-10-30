@@ -242,10 +242,12 @@ actual object CastDelivery {
                 // BurnJob failures are error codes only, never URLs, so they can be shown.
                 // No job at all means startSubtitleBurn couldn't read the prepared subtitle.
                 val detail = liveJob?.let { it.failure ?: error.message } ?: "subtitle unreadable"
-                subtitleNote = "Couldn't burn subtitles in ($detail); sent separately"
                 liveJob?.cancel()
                 liveJob = null
                 subtitleFile = prepareSubtitle(context, request, originMs = 0L)
+                // Set after the retry, which would otherwise replace the more useful burn error.
+                subtitleNote = "Couldn't burn subtitles in ($detail); " +
+                    if (subtitleFile != null) "sent separately" else "cast without subtitles"
                 null
             }
         }
@@ -314,7 +316,7 @@ actual object CastDelivery {
         val castSubtitles = if (externalSubtitle != null) {
             publish(CastLocalServer.Payload.LocalFile(externalSubtitle, SRT_CONTENT_TYPE), suffix = ".srt")
                 ?.let { url -> listOf(request.subtitles.first().copy(url = url)) }
-                .orEmpty()
+                ?: emptyList<CastSubtitleTrack>().also { subtitleNote = "Subtitle couldn't be served; cast without subtitles" }
         } else {
             emptyList()
         }
@@ -376,7 +378,8 @@ actual object CastDelivery {
                 // Only if this job still belongs to the current cast.
                 if (liveJob !== job) return@withLock
                 Log.w(TAG, "Live remux stopped during playback: $failure")
-                fail("The conversion stopped during playback")
+                // A burn's failure is error codes only; an FFmpeg log tail would carry URLs.
+                fail(if (job is BurnJob) "The conversion stopped during playback ($failure)" else "The conversion stopped during playback")
             }
         }
     }

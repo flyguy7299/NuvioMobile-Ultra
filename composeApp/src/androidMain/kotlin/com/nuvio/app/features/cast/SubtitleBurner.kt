@@ -171,7 +171,7 @@ internal fun startSubtitleBurn(
 }
 
 @OptIn(UnstableApi::class)
-private class BurnJob : LiveRemuxJob {
+internal class BurnJob : LiveRemuxJob {
     @Volatile var handler: Handler? = null
     // Only touched on the job's own looper thread.
     var transformer: Transformer? = null
