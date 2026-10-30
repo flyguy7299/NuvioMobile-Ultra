@@ -93,7 +93,12 @@ internal fun startSubtitleBurn(
                 }
 
                 override fun onError(composition: Composition, result: ExportResult, exception: ExportException) {
-                    job.finish(exception.message ?: "Export failed (${exception.errorCodeName})")
+                    Log.w(TAG, "Subtitle burn failed", exception)
+                    // Shown to the user, so codes and class names only: messages can carry the URL.
+                    job.finish(
+                        listOfNotNull(exception.errorCodeName, exception.cause?.let { it::class.simpleName })
+                            .joinToString(", "),
+                    )
                 }
             }
             val builder = Transformer.Builder(context)
@@ -159,7 +164,7 @@ internal fun startSubtitleBurn(
             transformer.start(composition, output.absolutePath)
         } catch (error: Throwable) {
             Log.e(TAG, "Could not start the subtitle burn", error)
-            job.finish(error.message ?: error.javaClass.simpleName)
+            job.finish(error.javaClass.simpleName)
         }
     }
     return job

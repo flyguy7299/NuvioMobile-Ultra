@@ -242,16 +242,18 @@ fun CastStatusBanner() {
     // already been shown does not flash up again every time the player is reopened.
     var dismissedOccurrence by remember { mutableStateOf(lastDismissedFailureOccurrence) }
     val failure = status as? CastDeliveryStatus.Failed
+    // Failures and a playing note are shown for a while, then hidden for good.
+    val transientOccurrence = failure?.occurrence ?: (status as? CastDeliveryStatus.Playing)?.occurrence
 
-    LaunchedEffect(failure?.occurrence) {
-        if (failure != null && failure.occurrence != dismissedOccurrence) {
+    LaunchedEffect(transientOccurrence) {
+        if (transientOccurrence != null && transientOccurrence != dismissedOccurrence) {
             delay(FAILURE_BANNER_MS)
-            lastDismissedFailureOccurrence = failure.occurrence
-            dismissedOccurrence = failure.occurrence
+            lastDismissedFailureOccurrence = transientOccurrence
+            dismissedOccurrence = transientOccurrence
         }
     }
 
-    if (message == null || (failure != null && failure.occurrence == dismissedOccurrence)) return
+    if (message == null || (transientOccurrence != null && transientOccurrence == dismissedOccurrence)) return
     val topOffsetPx = with(LocalDensity.current) { BANNER_TOP_OFFSET.roundToPx() }
     Popup(alignment = Alignment.TopCenter, offset = IntOffset(0, topOffsetPx)) {
         Surface(
@@ -290,7 +292,7 @@ fun castStatusMessage(): String? {
             if (value.progress in 0..100) append(" — ${value.progress}%")
             value.reasons.firstOrNull()?.let { append(" (${describeCastIncompatibility(it)})") }
         }
-        is CastDeliveryStatus.Playing -> null
+        is CastDeliveryStatus.Playing -> value.note
         is CastDeliveryStatus.Failed -> value.message
     }
 }

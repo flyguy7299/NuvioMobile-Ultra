@@ -53,6 +53,8 @@ actual object CastDelivery {
     private val publishedIds = mutableListOf<String>()
     private val workingFiles = mutableListOf<File>()
     private var liveJob: LiveRemuxJob? = null
+    /** What happened to this cast's subtitle, shown once it plays; null when there is nothing to say. */
+    private var subtitleNote: String? = null
 
     /** One delivery at a time: they share every field above. */
     private val deliveryLock = Mutex()
@@ -113,6 +115,7 @@ actual object CastDelivery {
         val receiver = resolveActiveReceiver() ?: return fail("No Cast device connected")
 
         releasePrevious()
+        subtitleNote = null
 
         val capabilities = receiver.capabilities
         val settings = NuvioEnhancedSettingsRepository.run {
@@ -163,6 +166,15 @@ actual object CastDelivery {
         // Not for HLS (Transformer's HLS input isn't relied on; those keep M3U8 -> TS with the
         // subtitle beside it) or live streams.
         val burnSubtitles = burnRequested && !dlnaHls && probe?.isLive != true
+        if (burnRequested && !burnSubtitles) {
+            subtitleNote = if (dlnaHls) {
+                "Subtitles can't be burned into M3U8 streams; sent separately"
+            } else {
+                "Subtitles can't be burned into live streams; sent separately"
+            }
+        } else if (receiver.prefersDirectPlay && settings.castBurnSubtitles && request.subtitles.isEmpty()) {
+            subtitleNote = "No addon subtitle selected, so none was burned in"
+        }
         val plan = when {
             // A burn-in needs no plan of its own; this one is only the fallback if it fails, so
             // nothing is asked now.
@@ -227,6 +239,10 @@ actual object CastDelivery {
                 startSubtitleBurn(context, request.url, request.headers, request.startPositionMs, shortSide, burnSource, output)
             }.getOrElse { error ->
                 Log.w(TAG, "Could not burn the subtitles in, sending them separately: ${error.message}")
+                // BurnJob failures are error codes only, never URLs, so they can be shown.
+                // No job at all means startSubtitleBurn couldn't read the prepared subtitle.
+                val detail = liveJob?.let { it.failure ?: error.message } ?: "subtitle unreadable"
+                subtitleNote = "Couldn't burn subtitles in ($detail); sent separately"
                 liveJob?.cancel()
                 liveJob = null
                 subtitleFile = prepareSubtitle(context, request, originMs = 0L)
@@ -323,11 +339,12 @@ actual object CastDelivery {
         return result.fold(
             onSuccess = {
                 _status.value = CastDeliveryStatus.Playing(
-                    when {
+                    mode = when {
                         subtitlesBurned -> CastDeliveryMode.TRANSCODE
                         liveRemux -> CastDeliveryMode.REMUX
                         else -> plan.mode
                     },
+                    note = if (subtitlesBurned) "Subtitles burned in; seeking is off while casting" else subtitleNote,
                 )
                 liveJob?.let(::watchLiveJob)
                 Result.success(Unit)
@@ -411,6 +428,7 @@ actual object CastDelivery {
             val srt = CastSubtitleConverter.toSrt(text, track.url, request.subtitleDelayMs.toLong(), originMs)
             if (srt == null) {
                 Log.w(TAG, "Subtitle format not recognised, casting without it")
+                subtitleNote = "Subtitle format not recognised; cast without subtitles"
                 return null
             }
             val file = newWorkingFile(context, ".srt")
@@ -423,6 +441,8 @@ actual object CastDelivery {
             throw cancelled
         } catch (error: Exception) {
             Log.w(TAG, "Could not fetch the subtitle, casting without it", error)
+            // The class only: the message can carry the subtitle URL.
+            subtitleNote = "Subtitle couldn't be downloaded (${error::class.simpleName}); cast without subtitles"
             null
         }
     }

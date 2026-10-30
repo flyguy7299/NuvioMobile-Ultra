@@ -15,8 +15,15 @@ sealed interface CastDeliveryStatus {
         val reasons: List<CastIncompatibility>,
     ) : CastDeliveryStatus
 
-    /** Handed off to the receiver. */
-    data class Playing(val mode: CastDeliveryMode) : CastDeliveryStatus
+    /**
+     * Handed off to the receiver. [note] is a one-off remark worth showing briefly, such as what
+     * happened to the subtitle; [occurrence] works as for [Failed].
+     */
+    data class Playing(
+        val mode: CastDeliveryMode,
+        val note: String? = null,
+        val occurrence: Long = nextFailureOccurrence(),
+    ) : CastDeliveryStatus
 
     /**
      * [occurrence] makes every failure distinct, so the same message twice in a row is still a
