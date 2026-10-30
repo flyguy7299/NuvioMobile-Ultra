@@ -35,6 +35,7 @@ actual object CastDelivery {
 
     private const val TS_CONTENT_TYPE = "video/mp2t"
     private const val MKV_CONTENT_TYPE = "video/x-matroska"
+    private const val MP4_CONTENT_TYPE = "video/mp4"
     private const val SRT_CONTENT_TYPE = "application/x-subrip"
 
     /** About ten seconds of a typical HLS rendition, so the renderer's first read is not starved. */
@@ -129,12 +130,15 @@ actual object CastDelivery {
                 null
             }
         }
-        val probe = if (receiver.prefersDirectPlay && !settings.castAlwaysConvert) {
+        // "Burn subtitles into the video" re-encodes with the subtitle drawn on, for renderers that
+        // show none at all. Only meaningful for DLNA, and only with a subtitle selected.
+        val burnRequested = receiver.prefersDirectPlay && settings.castBurnSubtitles && request.subtitles.isNotEmpty()
+        val probe = if (receiver.prefersDirectPlay && !settings.castAlwaysConvert && !burnRequested) {
             // Direct play only uses the probe for the container and duration, so a slow origin
             // must not hold the cast up. Under "Always convert" the probe decides whether to
-            // convert, so it gets the full time instead. The extractor's blocking read cannot be
-            // interrupted, so it runs in a detached scope and is abandoned on timeout rather
-            // than waited for.
+            // convert, and a burn-in uses it for the resolution, so they get the full time. The
+            // extractor's blocking read cannot be interrupted, so it runs in a detached scope and
+            // is abandoned on timeout rather than waited for.
             val pending = CoroutineScope(Dispatchers.IO).async { probeOrNull() }
             withTimeoutOrNull(DIRECT_PLAY_PROBE_TIMEOUT_MS) { pending.await() } ?: run {
                 if (pending.isActive) Log.w(TAG, "Probe did not finish in time, attempting direct play")
@@ -156,7 +160,12 @@ actual object CastDelivery {
         )
         val dlnaHls = receiver.prefersDirectPlay && directPlan.targetContainer == CastContainer.HLS
         val hlsAsTs = dlnaHls && shouldConvertHls(settings)
+        // Not for HLS (Transformer's HLS input isn't relied on; those keep M3U8 -> TS with the
+        // subtitle beside it) or live streams.
+        val burnSubtitles = burnRequested && !dlnaHls && probe?.isLive != true
         val plan = when {
+            // The burn-in output is H.264 + AAC anyway, so the planner has nothing to decide.
+            burnSubtitles -> directPlan
             // For a DLNA renderer an M3U8 stream is either converted live ("Convert M3U8") or
             // sent as is. The whole-file path below would have to download the entire stream
             // before playing, and would ask a second time after "Play as is".
@@ -180,13 +189,14 @@ actual object CastDelivery {
         // DLNA only: the selected addon subtitle is converted to SRT and served from the phone,
         // either beside the video or muxed into it ("Put subtitles inside the video"). Chromecast
         // gets none, as before: its receiver needs WebVTT with CORS, which isn't done here.
-        val muxSubtitles = receiver.prefersDirectPlay && settings.castEmbedSubtitles && FFMPEG_BUNDLED &&
+        val muxSubtitles = !burnSubtitles && receiver.prefersDirectPlay && settings.castEmbedSubtitles && FFMPEG_BUNDLED &&
             !hlsAsTs && plan.mode == CastDeliveryMode.DIRECT && probe?.isLive != true &&
             request.subtitles.isNotEmpty()
         // A stream that starts at the resume point (a live remux) needs its subtitle times shifted
         // the same way; the renderer seeks everything else itself.
         var subtitleFile = if (receiver.prefersDirectPlay) {
-            prepareSubtitle(context, request, originMs = if (hlsAsTs || muxSubtitles) request.startPositionMs else 0L)
+            val startsAtResume = hlsAsTs || muxSubtitles || burnSubtitles
+            prepareSubtitle(context, request, originMs = if (startsAtResume) request.startPositionMs else 0L)
         } else {
             null
         }
@@ -208,11 +218,26 @@ actual object CastDelivery {
             }
         }
 
+        // Optional in the same way: a failure falls back to the video with the subtitle beside it.
+        val burnedUrl = subtitleFile?.takeIf { burnSubtitles }?.let { burnSource ->
+            val shortSide = probe?.video?.let { minOf(it.width, it.height) }?.takeIf { it > 0 }
+            startLiveStream(context, ".mp4", MP4_CONTENT_TYPE, "video with burned-in subtitles") { output ->
+                startSubtitleBurn(context, request.url, request.headers, request.startPositionMs, shortSide, burnSource, output)
+            }.getOrElse { error ->
+                Log.w(TAG, "Could not burn the subtitles in, sending them separately: ${error.message}")
+                liveJob?.cancel()
+                liveJob = null
+                subtitleFile = prepareSubtitle(context, request, originMs = 0L)
+                null
+            }
+        }
+
         // --- Produce a playable source -------------------------------------------------
         val contentUrl: String
         val contentType: String
         val subtitlesMuxed = muxedUrl != null
-        val liveRemux = hlsAsTs || subtitlesMuxed
+        val subtitlesBurned = burnedUrl != null
+        val liveRemux = hlsAsTs || subtitlesMuxed || subtitlesBurned
 
         if (hlsAsTs) {
             contentType = TS_CONTENT_TYPE
@@ -225,6 +250,9 @@ actual object CastDelivery {
         } else if (muxedUrl != null) {
             contentType = MKV_CONTENT_TYPE
             contentUrl = muxedUrl
+        } else if (burnedUrl != null) {
+            contentType = MP4_CONTENT_TYPE
+            contentUrl = burnedUrl
         } else if (plan.mode == CastDeliveryMode.DIRECT) {
             contentType = contentTypeFor(plan.targetContainer)
             contentUrl = if (plan.requiresLocalServer) {
@@ -264,7 +292,7 @@ actual object CastDelivery {
 
         // Beside the video unless it went inside it. Served under a ".srt" path, which is how
         // renderers and the DIDL builder tell the subtitle format.
-        val externalSubtitle = subtitleFile?.takeUnless { subtitlesMuxed }
+        val externalSubtitle = subtitleFile?.takeUnless { subtitlesMuxed || subtitlesBurned }
         val castSubtitles = if (externalSubtitle != null) {
             publish(CastLocalServer.Payload.LocalFile(externalSubtitle, SRT_CONTENT_TYPE), suffix = ".srt")
                 ?.let { url -> listOf(request.subtitles.first().copy(url = url)) }
@@ -292,7 +320,13 @@ actual object CastDelivery {
 
         return result.fold(
             onSuccess = {
-                _status.value = CastDeliveryStatus.Playing(if (liveRemux) CastDeliveryMode.REMUX else plan.mode)
+                _status.value = CastDeliveryStatus.Playing(
+                    when {
+                        subtitlesBurned -> CastDeliveryMode.TRANSCODE
+                        liveRemux -> CastDeliveryMode.REMUX
+                        else -> plan.mode
+                    },
+                )
                 liveJob?.let(::watchLiveJob)
                 Result.success(Unit)
             },

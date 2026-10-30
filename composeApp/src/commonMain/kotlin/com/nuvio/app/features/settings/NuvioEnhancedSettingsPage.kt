@@ -516,6 +516,15 @@ private fun NuvioEnhancedSettingsPageContent(
                             onCheckedChange = NuvioEnhancedSettingsRepository::setCastEmbedSubtitles,
                         )
                     }
+                    // Burning in uses the phone's own encoder (Media3), so it needs no FFmpeg.
+                    SettingsGroupDivider(isTablet = isTablet)
+                    SettingsSwitchRow(
+                        title = stringResource(Res.string.nuvio_enhanced_cast_burn_subtitles_title),
+                        description = stringResource(Res.string.nuvio_enhanced_cast_burn_subtitles_desc),
+                        checked = settings.castBurnSubtitles,
+                        isTablet = isTablet,
+                        onCheckedChange = NuvioEnhancedSettingsRepository::setCastBurnSubtitles,
+                    )
                 }
             }
         }
