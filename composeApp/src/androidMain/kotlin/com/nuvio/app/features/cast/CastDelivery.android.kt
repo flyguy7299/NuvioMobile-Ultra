@@ -164,8 +164,10 @@ actual object CastDelivery {
         // subtitle beside it) or live streams.
         val burnSubtitles = burnRequested && !dlnaHls && probe?.isLive != true
         val plan = when {
-            // The burn-in output is H.264 + AAC anyway, so the planner has nothing to decide.
-            burnSubtitles -> directPlan
+            // A burn-in needs no plan of its own; this one is only the fallback if it fails, so
+            // nothing is asked now.
+            burnSubtitles && (probe == null || !settings.castAlwaysConvert) -> directPlan
+            burnSubtitles -> CastDeliveryPlanner.plan(probe!!, capabilities, request.sourceReachableByReceiver)
             // For a DLNA renderer an M3U8 stream is either converted live ("Convert M3U8") or
             // sent as is. The whole-file path below would have to download the entire stream
             // before playing, and would ask a second time after "Play as is".

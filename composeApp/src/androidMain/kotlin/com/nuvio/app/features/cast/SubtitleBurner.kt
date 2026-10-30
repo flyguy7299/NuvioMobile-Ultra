@@ -24,7 +24,7 @@ import androidx.media3.datasource.DataSourceBitmapLoader
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.OverlayEffect
-import androidx.media3.effect.OverlaySettings
+import androidx.media3.common.OverlaySettings
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -47,6 +47,8 @@ private const val TAG = "SubtitleBurner"
 private const val MAX_SHORT_SIDE = 1080
 private const val VIDEO_BITRATE = 8_000_000
 private const val AUDIO_BITRATE = 192_000
+/** How much video each written piece holds: the renderer waits about this long to start. */
+private const val FRAGMENT_DURATION_MS = 2_000L
 
 /**
  * Starts re-encoding [url] with the subtitle in [subtitleSrt] drawn onto the picture, writing a
@@ -99,7 +101,7 @@ internal fun startSubtitleBurn(
                 .addListener(listener)
                 .setVideoMimeType(MimeTypes.VIDEO_H264)
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
-                .setMuxerFactory(InAppFragmentedMp4Muxer.Factory())
+                .setMuxerFactory(InAppFragmentedMp4Muxer.Factory(FRAGMENT_DURATION_MS))
                 .setEncoderFactory(
                     DefaultEncoderFactory.Builder(context)
                         .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(VIDEO_BITRATE).build())
@@ -132,7 +134,8 @@ internal fun startSubtitleBurn(
             }
             val audioEffects = listOf(
                 ChannelMixingAudioProcessor().apply {
-                    listOf(1, 6, 8).forEach { inputChannels ->
+                    // Every layout but stereo itself; one left out would fail the export.
+                    (1..8).filter { it != 2 }.forEach { inputChannels ->
                         putChannelMixingMatrix(ChannelMixingMatrix.createForConstantGain(inputChannels, 2))
                     }
                 },
