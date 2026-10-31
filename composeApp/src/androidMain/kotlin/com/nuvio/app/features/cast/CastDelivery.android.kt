@@ -43,6 +43,9 @@ actual object CastDelivery {
     private const val HLS_MIN_START_BYTES = 64L * 1024
     private const val HLS_MIN_START_WAIT_MS = 5_000L
     private const val HLS_START_TIMEOUT_MS = 30_000L
+    // A burn from a resume point seeks and decodes up to it before writing anything; a little
+    // over SubtitleBurner's 60 s muxer limit, so that limit decides when it gives up.
+    private const val BURN_START_TIMEOUT_MS = 65_000L
     private const val HLS_START_POLL_MS = 250L
     private const val LIVE_JOB_WATCH_MS = 1_000L
 
@@ -247,7 +250,8 @@ actual object CastDelivery {
         // Optional in the same way: a failure falls back to the video with the subtitle beside it.
         val burnedUrl = subtitleFile?.takeIf { burnSubtitles }?.let { burnSource ->
             // A re-encode, so the banner says converting rather than repackaging.
-            startLiveStream(context, ".mp4", MP4_CONTENT_TYPE, "video with burned-in subtitles", CastDeliveryMode.TRANSCODE) { output ->
+            startLiveStream(context, ".mp4", MP4_CONTENT_TYPE, "video with burned-in subtitles",
+                CastDeliveryMode.TRANSCODE, BURN_START_TIMEOUT_MS) { output ->
                 startSubtitleBurn(context, request.url, request.headers, request.startPositionMs, burnSource, output)
             }.getOrElse { error ->
                 Log.w(TAG, "Could not burn the subtitles in, sending them separately: ${error.message}")
@@ -501,6 +505,7 @@ actual object CastDelivery {
         contentType: String,
         what: String,
         mode: CastDeliveryMode = CastDeliveryMode.REMUX,
+        startTimeoutMs: Long = HLS_START_TIMEOUT_MS,
         start: (File) -> LiveRemuxJob?,
     ): Result<String> {
         setProgress(CastDeliveryStatus.Preparing(mode, -1, emptyList()))
@@ -510,7 +515,7 @@ actual object CastDelivery {
         synchronized(stateLock) { liveJob = job }
 
         val started = try {
-            withTimeoutOrNull(HLS_START_TIMEOUT_MS) {
+            withTimeoutOrNull(startTimeoutMs) {
                 // A full head start when the stream delivers it quickly (any VOD); otherwise a
                 // small one plus a few seconds, which a low-bitrate live stream produces only in
                 // real time and might never reach 512 KB of within the timeout.
