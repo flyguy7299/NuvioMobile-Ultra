@@ -201,12 +201,19 @@ fun CastDeliveryEffect(
     // The work runs in LaunchedEffect's own scope, so leaving the player cancels an in-flight
     // transcode rather than leaving it running against a discarded composition.
     LaunchedEffect(receiverId, request?.url) {
+        // Disconnected: reconnecting to the same receiver must cast again, not count as done.
+        val receiver = receiverId ?: run {
+            lastDelivered = null
+            return@LaunchedEffect
+        }
         val target = request ?: return@LaunchedEffect
-        val receiver = receiverId ?: return@LaunchedEffect
         val delivery = receiver to target.url
         if (lastDelivered == delivery) return@LaunchedEffect
         lastDelivered = delivery
-        onFinished(CastDelivery.cast(target))
+        val result = CastDelivery.cast(target)
+        // Likewise after a failure, so picking the receiver again retries.
+        if (result.isFailure) lastDelivered = null
+        onFinished(result)
     }
 }
 

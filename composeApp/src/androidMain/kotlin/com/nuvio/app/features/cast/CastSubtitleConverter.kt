@@ -106,14 +106,21 @@ internal object CastSubtitleConverter {
     private fun flatten(cues: List<Cue>): List<Cue> {
         if (cues.isEmpty()) return cues
         val boundaries = cues.flatMap { listOf(it.startMs, it.endMs) }.distinct().sorted()
+        // A sweep over the boundaries, keeping the cues showing between them, instead of scanning
+        // every cue for every slice: that was slow on a long dual-language file.
+        val startingAt = cues.indices.groupBy { cues[it].startMs }
+        val endingAt = cues.indices.groupBy { cues[it].endMs }
+        // Source order, not time order, so a dual-language file keeps each language on the same
+        // line even when one of its cues ends sooner than the other.
+        val showing = java.util.TreeSet<Int>()
         val result = mutableListOf<Cue>()
         for (i in 0 until boundaries.size - 1) {
             val from = boundaries[i]
             val to = boundaries[i + 1]
-            // Source order, not time order, so a dual-language file keeps each language on the
-            // same line even when one of its cues ends sooner than the other.
-            val text = cues.filter { it.startMs <= from && it.endMs >= to }
-                .map { it.text }
+            endingAt[from]?.let(showing::removeAll)
+            // A zero-length cue never shows.
+            startingAt[from]?.filter { cues[it].endMs > from }?.let(showing::addAll)
+            val text = showing.map { cues[it].text }
                 .distinct()
                 .joinToString("\n")
             if (text.isEmpty()) continue

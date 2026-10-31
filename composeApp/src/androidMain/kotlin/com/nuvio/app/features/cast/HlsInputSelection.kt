@@ -18,8 +18,9 @@ internal data class HlsInputs(val video: String, val audio: String? = null)
  * Falls back to [url] itself when it isn't a master playlist or can't be read.
  */
 internal fun selectHlsInputs(url: String, headers: Map<String, String>): HlsInputs {
-    val text = runCatching { fetchText(url, headers) }.getOrNull() ?: return HlsInputs(url)
-    return parseHlsMaster(text, url) ?: HlsInputs(url)
+    val (text, finalUrl) = runCatching { fetchText(url, headers) }.getOrNull() ?: return HlsInputs(url)
+    // Relative URIs are relative to where the playlist actually came from, after redirects.
+    return parseHlsMaster(text, finalUrl) ?: HlsInputs(url)
 }
 
 internal fun parseHlsMaster(text: String, baseUrl: String): HlsInputs? {
@@ -61,7 +62,8 @@ private fun parseAttributes(list: String): Map<String, String> =
 
 private fun resolve(base: String, reference: String): String = URL(URL(base), reference).toString()
 
-private fun fetchText(url: String, headers: Map<String, String>): String {
+/** The body, and the URL it came from once redirects were followed. */
+private fun fetchText(url: String, headers: Map<String, String>): Pair<String, String> {
     val connection = (URL(url).openConnection() as HttpURLConnection).apply {
         connectTimeout = FETCH_TIMEOUT_MS
         readTimeout = FETCH_TIMEOUT_MS
@@ -69,7 +71,8 @@ private fun fetchText(url: String, headers: Map<String, String>): String {
         headers.forEach { (key, value) -> setRequestProperty(key, value) }
     }
     return try {
-        connection.inputStream.bufferedReader().use { it.readText() }
+        val text = connection.inputStream.bufferedReader().use { it.readText() }
+        text to connection.url.toString()
     } finally {
         connection.disconnect()
     }

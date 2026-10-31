@@ -186,17 +186,16 @@ private fun startLiveRemux(args: List<String>): LiveRemuxJob? {
         FFmpegKit.executeWithArgumentsAsync(
             args.toTypedArray(),
             { completed ->
+                // The return code only: FFmpeg's log and stack trace name every URL it opened,
+                // signed tokens included, and the failure ends up in logcat.
                 job.failure = if (ReturnCode.isSuccess(completed.returnCode) || ReturnCode.isCancel(completed.returnCode)) {
                     null
                 } else {
-                    completed.failStackTrace
-                        ?: completed.allLogsAsString?.takeLast(LOG_TAIL_CHARS)
-                        ?: "ffmpeg exited with ${completed.returnCode}"
+                    "ffmpeg exited with ${completed.returnCode}"
                 }
                 job.isFinished = true
             },
-            // FFmpeg logs every segment URL it opens, signed tokens included, so nothing is
-            // forwarded to logcat; a failure still reports the tail of the log above.
+            // Nothing is forwarded to logcat, for the same reason.
             { },
             null,
         )
@@ -249,7 +248,8 @@ private class FFmpegCastMediaProcessor : CastMediaProcessor {
             ?: return Result.failure(
                 IllegalStateException("This FFmpeg build has no encoder for the requested output"),
             )
-        Log.i(TAG, "ffmpeg $command")
+        // Not the command itself: it carries the source URL and request headers.
+        Log.i(TAG, "ffmpeg ${plan.mode} to ${plan.targetContainer}")
 
         return suspendCancellableCoroutine { continuation ->
             val session: FFmpegSession = try { FFmpegKit.executeAsync(
@@ -260,15 +260,13 @@ private class FFmpegCastMediaProcessor : CastMediaProcessor {
                     if (ReturnCode.isSuccess(completed.returnCode)) {
                         continuation.resume(Result.success(output))
                     } else {
-                        // The tail of the log is what actually explains a failure; the return
-                        // code alone is almost always just 1.
-                        val detail = completed.failStackTrace
-                            ?: completed.allLogsAsString?.takeLast(LOG_TAIL_CHARS)
-                            ?: "ffmpeg exited with ${completed.returnCode}"
-                        continuation.resume(Result.failure(IllegalStateException(detail)))
+                        // The return code only, as in startLiveRemux: the log names the source URL.
+                        continuation.resume(
+                            Result.failure(IllegalStateException("ffmpeg exited with ${completed.returnCode}")),
+                        )
                     }
                 },
-                { log -> Log.v(TAG, log.message) },
+                { },
                 { statistics ->
                     val percent = if (durationMs != null && durationMs > 0) {
                         val done = statistics.time.toLong()
@@ -415,7 +413,6 @@ private class FFmpegCastMediaProcessor : CastMediaProcessor {
 }
 
 private const val TAG = "FFmpegCast"
-private const val LOG_TAIL_CHARS = 2000
 private const val ENCODER_H264_MEDIACODEC = "h264_mediacodec"
 private const val ENCODER_HEVC_MEDIACODEC = "hevc_mediacodec"
 private const val ENCODER_LIBX264 = "libx264"

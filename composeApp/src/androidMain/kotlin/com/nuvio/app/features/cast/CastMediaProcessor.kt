@@ -247,16 +247,12 @@ class Media3CastMediaProcessor(private val context: Context) : CastMediaProcesso
                         if (outputChannels in 1..8) {
                             add(
                                 ChannelMixingAudioProcessor().apply {
-                                    listOf(1, 2, 6, 8)
-                                        .filter { it != outputChannels }
-                                        .forEach { inputChannels ->
-                                            putChannelMixingMatrix(
-                                                ChannelMixingMatrix.createForConstantGain(
-                                                    inputChannels,
-                                                    outputChannels,
-                                                ),
-                                            )
-                                        }
+                                    // The identity is registered too: an input with no matrix at
+                                    // all fails the export, even when it already matches.
+                                    listOf(1, 2, 6, 8).forEach { inputChannels ->
+                                        channelMixingMatrix(inputChannels, outputChannels)
+                                            ?.let(::putChannelMixingMatrix)
+                                    }
                                 },
                             )
                         }
@@ -350,6 +346,55 @@ internal fun audioMimeTypeFor(codec: CastAudioCodec): String? = when (codec) {
     CastAudioCodec.OPUS -> MimeTypes.AUDIO_OPUS
     CastAudioCodec.VORBIS -> MimeTypes.AUDIO_VORBIS
     else -> null
+}
+
+private const val HALF_POWER = 0.7071f
+
+/**
+ * The matrix mixing [input] channels into [output], or null when there is no sensible one (the
+ * export then fails for that input rather than guessing).
+ *
+ * Written out rather than taken from Media3: createForConstantGain only knows 1<->2 and throws
+ * otherwise, which crashed the app, and createForConstantPower's 3..6 -> stereo tables are laid
+ * out output by output while ChannelMixingMatrix reads them input by input, so they scramble the
+ * channels. Gains are Android's own downmix (system/media audio_utils ChannelMix), in Android's
+ * channel order: FL FR FC LFE BL BR SL SR.
+ */
+@OptIn(UnstableApi::class)
+internal fun channelMixingMatrix(input: Int, output: Int): ChannelMixingMatrix? {
+    if (input == output) return ChannelMixingMatrix.createForConstantGain(input, output)
+    // (left, right) gain of each input channel.
+    val stereo = when (input) {
+        1 -> listOf(HALF_POWER to HALF_POWER)
+        2 -> listOf(1f to 0f, 0f to 1f)
+        3 -> listOf(1f to 0f, 0f to 1f, HALF_POWER to HALF_POWER)
+        4 -> listOf(1f to 0f, 0f to 1f, HALF_POWER to 0f, 0f to HALF_POWER)
+        5 -> listOf(1f to 0f, 0f to 1f, HALF_POWER to HALF_POWER, HALF_POWER to 0f, 0f to HALF_POWER)
+        6, 8 -> listOf(1f to 0f, 0f to 1f, HALF_POWER to HALF_POWER, 0.5f to 0.5f, HALF_POWER to 0f, 0f to HALF_POWER) +
+            if (input == 8) listOf(HALF_POWER to 0f, 0f to HALF_POWER) else emptyList()
+        else -> return null
+    }
+    val coefficients = when (output) {
+        2 -> stereo.flatMap { (left, right) -> listOf(left, right) }
+        // Mono is the stereo mix folded at half power, which gives Android's mono gains.
+        1 -> stereo.map { (left, right) -> (left + right) * HALF_POWER }
+        // 7.1 -> 5.1: the sides fold into the backs. Nothing else downmixes to surround (the
+        // planner never targets more channels than the source has).
+        6 -> if (input == 8) {
+            (0 until 8).flatMap { from ->
+                val to = when (from) {
+                    in 0..5 -> from
+                    6 -> 4
+                    else -> 5
+                }
+                (0 until 6).map { if (it == to) (if (from >= 6) HALF_POWER else 1f) else 0f }
+            }
+        } else {
+            return null
+        }
+        else -> return null
+    }
+    return ChannelMixingMatrix(input, output, coefficients.toFloatArray())
 }
 
 /** Runs [secondary] if [primary] fails, so one unsupported encoder does not sink the cast. */

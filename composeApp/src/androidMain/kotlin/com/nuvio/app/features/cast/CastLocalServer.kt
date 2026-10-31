@@ -141,7 +141,8 @@ class CastLocalServer {
                 try {
                     client.use(::handle)
                 } catch (error: Throwable) {
-                    Log.w(TAG, "Request failed", error)
+                    // The class only: a proxied request's errors name the source URL.
+                    Log.w(TAG, "Request failed: ${error::class.simpleName}")
                 }
             }
         }
@@ -322,11 +323,17 @@ class CastLocalServer {
         }
         try {
             val status = connection.responseCode
+            // An error is passed on as itself, with no body: reading one throws, and its message
+            // carries the source URL into the log.
+            if (status >= 400) {
+                return respondStatus(output, status, connection.responseMessage?.takeIf { it.isNotBlank() } ?: "Error")
+            }
             val length = connection.getHeaderFieldLong("Content-Length", -1L)
             writeHeaders(
                 output,
                 status = status,
-                reason = if (status == 206) "Partial Content" else "OK",
+                reason = connection.responseMessage?.takeIf { it.isNotBlank() }
+                    ?: if (status == 206) "Partial Content" else "OK",
                 contentType = connection.contentType ?: payload.contentType,
                 contentLength = length.takeIf { it >= 0 },
                 contentRange = connection.getHeaderField("Content-Range"),

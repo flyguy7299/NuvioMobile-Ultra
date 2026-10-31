@@ -58,6 +58,11 @@ actual object CastDelivery {
 
     /** One delivery at a time: they share every field above. */
     private val deliveryLock = Mutex()
+    /**
+     * Guards the resource lists and the final status against cancel(), which runs outside
+     * [deliveryLock] while a delivery may still be unwinding.
+     */
+    private val stateLock = Any()
     @Volatile private var activeDelivery: Job? = null
     private val castGeneration = AtomicLong()
     private val watchScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -99,9 +104,16 @@ actual object CastDelivery {
                 // Leaving the player, or Stop casting, mid-cast: nothing this cast created is
                 // wanted, and the status would otherwise strand at Probing/Preparing, which the
                 // player's banner then shows the next time it opens.
-                releasePrevious()
-                _status.value = CastDeliveryStatus.Idle
+                synchronized(stateLock) {
+                    releasePrevious()
+                    _status.value = CastDeliveryStatus.Idle
+                }
                 throw cancelled
+            } catch (error: Exception) {
+                // Anything unexpected fails the cast; thrown on, it would crash the app. The class
+                // only, as elsewhere: a message can carry the stream URL.
+                Log.w(TAG, "Cast failed: ${error::class.simpleName}")
+                fail("Casting failed (${error::class.simpleName})")
             } finally {
                 if (activeDelivery === self) activeDelivery = null
             }
@@ -124,7 +136,7 @@ actual object CastDelivery {
         }
 
         // --- Probe ---------------------------------------------------------------------
-        _status.value = CastDeliveryStatus.Probing
+        setProgress(CastDeliveryStatus.Probing)
         val probeOrNull: suspend () -> CastMediaProbe? = {
             probeCastMedia(request.url, request.headers).getOrElse { error ->
                 // A probe failure is not fatal. The receiver may well handle the stream, so fall
@@ -234,7 +246,8 @@ actual object CastDelivery {
 
         // Optional in the same way: a failure falls back to the video with the subtitle beside it.
         val burnedUrl = subtitleFile?.takeIf { burnSubtitles }?.let { burnSource ->
-            startLiveStream(context, ".mp4", MP4_CONTENT_TYPE, "video with burned-in subtitles") { output ->
+            // A re-encode, so the banner says converting rather than repackaging.
+            startLiveStream(context, ".mp4", MP4_CONTENT_TYPE, "video with burned-in subtitles", CastDeliveryMode.TRANSCODE) { output ->
                 startSubtitleBurn(context, request.url, request.headers, request.startPositionMs, burnSource, output)
             }.getOrElse { error ->
                 Log.w(TAG, "Could not burn the subtitles in, sending them separately: ${error.message}")
@@ -281,7 +294,7 @@ actual object CastDelivery {
                 request.url
             }
         } else {
-            _status.value = CastDeliveryStatus.Preparing(plan.mode, -1, plan.reasons)
+            setProgress(CastDeliveryStatus.Preparing(plan.mode, -1, plan.reasons))
 
             val engine = processor ?: castMediaProcessor(context).also { processor = it }
             val output = newWorkingFile(context, ".mp4")
@@ -293,7 +306,7 @@ actual object CastDelivery {
                 durationMs = probe?.durationMs,
                 headers = request.headers,
             ) { progress ->
-                _status.value = CastDeliveryStatus.Preparing(plan.mode, progress.percent, plan.reasons)
+                setProgress(CastDeliveryStatus.Preparing(plan.mode, progress.percent, plan.reasons))
             }.getOrElse { error ->
                 Log.w(TAG, "${plan.mode} failed", error)
                 return fail(
@@ -331,7 +344,10 @@ actual object CastDelivery {
                 // A live remux already starts at the resume point and cannot be seeked, so the
                 // renderer must not be asked to seek again.
                 startPositionMs = if (liveRemux) 0L else request.startPositionMs,
-                durationMs = probe?.durationMs,
+                // Likewise its length is only what is left from there.
+                durationMs = probe?.durationMs?.let { full ->
+                    if (liveRemux) (full - request.startPositionMs.coerceAtLeast(0)).coerceAtLeast(0) else full
+                },
                 isLive = probe?.isLive == true && probe.durationMs == null,
                 subtitles = castSubtitles,
             ),
@@ -339,15 +355,20 @@ actual object CastDelivery {
 
         return result.fold(
             onSuccess = {
-                _status.value = CastDeliveryStatus.Playing(
-                    mode = when {
-                        subtitlesBurned -> CastDeliveryMode.TRANSCODE
-                        liveRemux -> CastDeliveryMode.REMUX
-                        else -> plan.mode
-                    },
-                    note = if (subtitlesBurned) "Subtitles burned in; seeking is off while casting" else subtitleNote,
-                )
-                liveJob?.let(::watchLiveJob)
+                synchronized(stateLock) {
+                    // As in fail(): cancelled meanwhile, the status is already Idle.
+                    if (activeDelivery?.isCancelled != true) {
+                        _status.value = CastDeliveryStatus.Playing(
+                            mode = when {
+                                subtitlesBurned -> CastDeliveryMode.TRANSCODE
+                                liveRemux -> CastDeliveryMode.REMUX
+                                else -> plan.mode
+                            },
+                            note = if (subtitlesBurned) "Subtitles burned in; seeking is off while casting" else subtitleNote,
+                        )
+                        liveJob?.let(::watchLiveJob)
+                    }
+                }
                 Result.success(Unit)
             },
             onFailure = { error -> fail(error.message ?: "The TV refused the stream") },
@@ -361,8 +382,11 @@ actual object CastDelivery {
         castGeneration.incrementAndGet()
         activeDelivery?.cancel()
         processor?.cancel()
-        releasePrevious()
-        _status.value = CastDeliveryStatus.Idle
+        // Under stateLock, so a live job's watcher can't report a failure after this.
+        synchronized(stateLock) {
+            releasePrevious()
+            _status.value = CastDeliveryStatus.Idle
+        }
     }
 
     /**
@@ -373,12 +397,15 @@ actual object CastDelivery {
         watchScope.launch {
             while (!job.isFinished) delay(LIVE_JOB_WATCH_MS)
             val failure = job.failure ?: return@launch
+            // cancel() doesn't take deliveryLock (it isn't suspending), so the check and the
+            // failure are made atomic against it with stateLock.
             deliveryLock.withLock {
-                // Only if this job still belongs to the current cast.
-                if (liveJob !== job) return@withLock
-                Log.w(TAG, "Live remux stopped during playback: $failure")
-                // A burn's failure is error codes only; an FFmpeg log tail would carry URLs.
-                fail(if (job is BurnJob) "The conversion stopped during playback ($failure)" else "The conversion stopped during playback")
+                synchronized(stateLock) {
+                    // Only if this job still belongs to the current cast.
+                    if (liveJob !== job) return@withLock
+                    Log.w(TAG, "Live remux stopped during playback: $failure")
+                    fail("The conversion stopped during playback ($failure)")
+                }
             }
         }
     }
@@ -426,8 +453,11 @@ actual object CastDelivery {
     private suspend fun prepareSubtitle(context: Context, request: CastStreamRequest, originMs: Long): File? {
         val track = request.subtitles.firstOrNull() ?: return null
         return try {
-            val text = httpGetTextWithHeaders(track.url, sanitizePlaybackHeaders(request.headers))
-            val srt = CastSubtitleConverter.toSrt(text, track.url, request.subtitleDelayMs.toLong(), originMs)
+            val text = httpGetTextWithHeaders(track.url, subtitleHeaders(track.url, request))
+            // Off the main thread, which cast() is called from: a long file takes a moment.
+            val srt = withContext(Dispatchers.Default) {
+                CastSubtitleConverter.toSrt(text, track.url, request.subtitleDelayMs.toLong(), originMs)
+            }
             if (srt == null) {
                 Log.w(TAG, "Subtitle format not recognised, casting without it")
                 subtitleNote = "Subtitle format not recognised; cast without subtitles"
@@ -450,6 +480,17 @@ actual object CastDelivery {
     }
 
     /**
+     * The stream's headers can hold its credentials (cookies, tokens), so they only go to a
+     * subtitle on the stream's own host. Any other host gets the User-Agent alone.
+     */
+    private fun subtitleHeaders(subtitleUrl: String, request: CastStreamRequest): Map<String, String> {
+        val headers = sanitizePlaybackHeaders(request.headers)
+        val host = { url: String -> runCatching { java.net.URI(url).host?.lowercase() }.getOrNull() }
+        val sameHost = host(subtitleUrl)?.let { it == host(request.url) } == true
+        return if (sameHost) headers else headers.filterKeys { it.equals("User-Agent", ignoreCase = true) }
+    }
+
+    /**
      * Starts a live remux into a new working file and publishes it while it is still being
      * written, once there is enough of a head start for the renderer's first read. Returns the
      * URL to hand the renderer. [what] names the stream in error messages.
@@ -459,13 +500,14 @@ actual object CastDelivery {
         extension: String,
         contentType: String,
         what: String,
+        mode: CastDeliveryMode = CastDeliveryMode.REMUX,
         start: (File) -> LiveRemuxJob?,
     ): Result<String> {
-        _status.value = CastDeliveryStatus.Preparing(CastDeliveryMode.REMUX, -1, emptyList())
+        setProgress(CastDeliveryStatus.Preparing(mode, -1, emptyList()))
         val output = newWorkingFile(context, extension)
         val job = start(output)
             ?: return Result.failure(IllegalStateException("This build cannot convert the $what"))
-        liveJob = job
+        synchronized(stateLock) { liveJob = job }
 
         val started = try {
             withTimeoutOrNull(HLS_START_TIMEOUT_MS) {
@@ -501,17 +543,18 @@ actual object CastDelivery {
     }
 
     /** Publishes [payload] under a new route this cast owns, so [releasePrevious] removes it. */
-    private fun publish(payload: CastLocalServer.Payload, suffix: String = ""): String? {
+    private fun publish(payload: CastLocalServer.Payload, suffix: String = ""): String? = synchronized(stateLock) {
         val id = newId() + suffix
         publishedIds += id
-        return server.publish(id, payload)
+        server.publish(id, payload)
     }
 
     /** A new file in the cast cache this cast owns, so [releasePrevious] deletes it. */
-    private fun newWorkingFile(context: Context, extension: String): File =
+    private fun newWorkingFile(context: Context, extension: String): File = synchronized(stateLock) {
         File(context.cacheDir, "cast/${newId()}$extension").also { workingFiles += it }
+    }
 
-    private fun releasePrevious() {
+    private fun releasePrevious() = synchronized(stateLock) {
         liveJob?.cancel()
         liveJob = null
         publishedIds.forEach(server::unpublish)
@@ -520,11 +563,23 @@ actual object CastDelivery {
         workingFiles.clear()
     }
 
+    /**
+     * A status on the way to playing. Dropped unless a delivery is still running: a converter's
+     * progress callback can arrive after cancel() set Idle, or after the cast ended.
+     */
+    private fun setProgress(status: CastDeliveryStatus) = synchronized(stateLock) {
+        if (activeDelivery?.isActive == true) _status.value = status
+    }
+
     private fun fail(message: String): Result<Unit> {
         // Nothing failed casts leave behind is still wanted, and a live remux left running would
         // keep downloading the whole stream into the cache.
-        releasePrevious()
-        _status.value = CastDeliveryStatus.Failed(message)
+        synchronized(stateLock) {
+            releasePrevious()
+            // A delivery cancelled meanwhile (Stop casting, or a newer cast) has already set the
+            // status; a late failure must not replace it.
+            if (activeDelivery?.isCancelled != true) _status.value = CastDeliveryStatus.Failed(message)
+        }
         return Result.failure(IllegalStateException(message))
     }
 
