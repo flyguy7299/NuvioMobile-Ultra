@@ -40,6 +40,9 @@ private const val TAG = "SubtitleBurner"
 /** How much video each written piece holds: the renderer waits about this long to start. */
 private const val FRAGMENT_DURATION_MS = 2_000L
 
+/** How long the burn may go without writing anything before it gives up and falls back. */
+private const val MAX_DELAY_BETWEEN_SAMPLES_MS = 60_000L
+
 /**
  * Starts re-encoding [url] with the subtitle in [subtitleSrt] drawn onto the picture, writing a
  * fragmented MP4 to [output] that can be served while it grows. Returns null when the subtitle
@@ -96,6 +99,9 @@ internal fun startSubtitleBurn(
                 .setLooper(thread.looper)
                 .addListener(listener)
                 .setMuxerFactory(InAppFragmentedMp4Muxer.Factory(FRAGMENT_DURATION_MS))
+                // The default 10 s counts from start(), before the first frame: a resume spends that
+                // seeking the remote file and decoding up to the resume point, then aborts.
+                .setMaxDelayBetweenMuxerSamplesMs(MAX_DELAY_BETWEEN_SAMPLES_MS)
             // Same reason as Media3CastMediaProcessor: the stock loader has nowhere to put headers.
             if (headers.isNotEmpty()) {
                 val httpDataSourceFactory = DefaultHttpDataSource.Factory()
